@@ -2,6 +2,7 @@ use std::fmt;
 
 use enum_map::EnumMap;
 use paste::paste;
+use smallvec::SmallVec;
 
 use crate::{
     lexer::{FatalLexerError, TinyLexer},
@@ -134,12 +135,20 @@ macro_rules! impl_enum_parse {
 }
 
 macro_rules! field_type {
-    ( [$Field:ident] ) => { Token<token::$Field, S> };
-    ( [$Field:ident?] ) => { Option<Token<token::$Field, S>> };
-    ( [$Field:ident*] ) => { Vec<Token<token::$Field, S>> };
-    ( ($Field:ident) ) => { $Field<S> };
-    ( ($Field:ident?) ) => { Option<$Field<S>> };
-    ( ($Field:ident*) ) => { Vec<$Field<S>> };
+    ( [$Token:ident] ) => { Token<token::$Token, S> };
+    ( [$Token:ident?] ) => { Option<Token<token::$Token, S>> };
+    // Could in theory optimized repetitions of fixed tokens, since those can be represented by
+    // a single usize, whereas SmallVec and Vec are always 24 bytes; but since a series of the same
+    // fixed token would make for a quite odd grammar, there is no need to overcomplicate this.
+    ( [$Token:ident*] ) => { SmallVec<[Token<token::$Token, S>; 1]> };
+    ( ($Node:ident) ) => { $Node<S> };
+    // While maybe useful, forbidding Box for unconditional nodes prevents unparsable grammars.
+    // However, I think, it is almost always better to box an optional node instead anyway.
+    // ( ($Node:ident[]) ) => { Box<$Node<S>> };
+    ( ($Node:ident?) ) => { Option<$Node<S>> };
+    ( ($Node:ident[?]) ) => { Option<Box<$Node<S>>> };
+    ( ($Node:ident*) ) => { SmallVec<[$Node<S>; 1]> };
+    ( ($Node:ident[*]) ) => { Vec<$Node<S>> };
 }
 
 macro_rules! token {
@@ -162,7 +171,9 @@ macro_rules! until_required {
     ( $tokens:ident [$Token:ident*] $( $rest:tt )* ) => { { token!($tokens $Token); until_required!( $tokens $( $rest )* ) } };
     ( $tokens:ident ($Node:ident) $( $rest:tt )* ) => { { node!($tokens $Node); $tokens } };
     ( $tokens:ident ($Node:ident?) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
+    ( $tokens:ident ($Node:ident[?]) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
     ( $tokens:ident ($Node:ident*) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
+    ( $tokens:ident ($Node:ident[*]) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
 }
 
 /// Executes the given macro repeatedly, popping the first item on each step.
@@ -212,29 +223,45 @@ macro_rules! tiny_parse_node {
     };
 }
 
+macro_rules! tiny_parse_repetition {
+    ( $tiny_parse_token_or_node:ident $Vec:ident $TokenOrNode:ident $lexer:ident $matches:tt $expect:tt ) => { {
+        let mut expect = $expect;
+        // I'm almost certain potential ambiguities on this runtime xor are already prevented by
+        // EXPECTED_TOKENS_FROM, but I'm not 100% sure.
+        expect.tokens = expect.tokens.xor_without_ambiguity($matches);
+        let mut result = $Vec::new();
+        while $lexer.peek_matches($matches) {
+            result.push($tiny_parse_token_or_node!($TokenOrNode $lexer expect));
+        }
+        result
+    } };
+}
+
 macro_rules! tiny_parse_by_mode {
-    ( [$Token:tt] $lexer:ident if $matches:tt $expect:tt ) => { tiny_parse_token!($Token $lexer $expect) };
-    ( ($Node:tt) $lexer:ident if $matches:tt $expect:tt ) => { tiny_parse_node!($Node $lexer $expect) };
-    ( [$Token:tt?] $lexer:ident if $matches:tt $expect:tt ) => {
-        if $matches { Some(tiny_parse_token!($Token $lexer $expect)) } else { None }
+    ( [$Token:tt] $lexer:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_token!($Token $lexer $expect)
     };
-    ( ($Node:tt?) $lexer:ident if $matches:tt $expect:tt ) => {
-        if $matches { Some(tiny_parse_node!($Node $lexer $expect)) } else { None }
+    ( ($Node:tt) $lexer:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_node!($Node $lexer $expect)
     };
-    ( [$Token:tt*] $lexer:ident if $matches:tt $expect:tt ) => { {
-        let mut result = Vec::new();
-        while $matches {
-            result.push(tiny_parse_token!($Token $lexer $expect));
-        }
-        result
-    } };
-    ( ($Node:tt*) $lexer:ident if $matches:tt $expect:tt ) => { {
-        let mut result = Vec::new();
-        while $matches {
-            result.push(tiny_parse_node!($Node $lexer $expect));
-        }
-        result
-    } };
+    ( [$Token:tt?] $lexer:ident match $matches:tt $expect:tt ) => {
+        if $lexer.peek_matches($matches) { Some(tiny_parse_token!($Token $lexer $expect)) } else { None }
+    };
+    ( ($Node:tt?) $lexer:ident match $matches:tt $expect:tt ) => {
+        if $lexer.peek_matches($matches) { Some(tiny_parse_node!($Node $lexer $expect)) } else { None }
+    };
+    ( ($Node:tt[?]) $lexer:ident match $matches:tt $expect:tt ) => {
+        if $lexer.peek_matches($matches) { Some(Box::new(tiny_parse_node!($Node $lexer $expect))) } else { None }
+    };
+    ( [$Token:tt*] $lexer:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_repetition!(tiny_parse_token SmallVec $Token $lexer $matches $expect)
+    };
+    ( ($Node:tt*) $lexer:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_repetition!(tiny_parse_node SmallVec $Node $lexer $matches $expect)
+    };
+    ( ($Node:tt[*]) $lexer:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_repetition!(tiny_parse_node Vec $Node $lexer $matches $expect)
+    };
 }
 
 macro_rules! impl_struct_parse {
@@ -320,8 +347,8 @@ macro_rules! impl_struct_parse {
 
                 fn tiny_parse_nested(lexer: &mut TinyLexer, expect: Expect) -> Result<Self, FatalLexerError> {
                     Ok(Self { $( $field: {
-                        tiny_parse_by_mode!($Field lexer if {
-                            Self::EXPECTED_TOKENS_AT[struct_fields::$Name::[<$field:camel>]].contains(lexer.peek_expected())
+                        tiny_parse_by_mode!($Field lexer match {
+                            Self::EXPECTED_TOKENS_AT[struct_fields::$Name::[<$field:camel>]]
                         } {
                             if let Some(next_field) = struct_fields::$Name::[<$field:camel>].next() {
                                 let next_expected_tokens = Self::EXPECTED_TOKENS_FROM[next_field];
@@ -331,9 +358,8 @@ macro_rules! impl_struct_parse {
                                         or_end_of_input: false,
                                     }
                                 } else {
-                                    // TODO: This is unfortunately only a runtime check at the moment.
-                                    //       No idea if it's possible to also do it at compile time.
                                     Expect {
+                                        // TODO: Check this at compile time or at least in a test if possible.
                                         tokens: next_expected_tokens.tokens.xor_without_ambiguity(expect.tokens),
                                         or_end_of_input: expect.or_end_of_input,
                                     }
@@ -407,22 +433,18 @@ impl_enum_parse! {
 }
 
 impl_struct_parse! {
-    struct BinaryOperation {
-        operator: (BinaryOperator?),
-        literal: (Literal),
-        other: (Other*),
-        module: (Module*),
-        x: [Ident*],
-    }
-
-    struct Other {
-        // x: [Pub],
-        binary: (BinaryOperation*),
-        fn_kw: [Fn],
-    }
-
-    struct Module {
-        mod_kw: [Mod*],
+    // TODO: Try to detect ambiguous grammer like the following:
+    //       "+ +" is parsed as follows:
+    //
+    // SelfRepetition{
+    //     plus: todo!(),
+    //     more: vec![SelfRepetition{ plus: todo!(), more: vec![] }, ],
+    // };
+    //
+    // Which is now ambiguous in which vec to push a theoretical new SelfRepetition into.
+    struct SelfRepetition {
+        plus: [Plus],
+        more: (SelfRepetition[*]),
     }
 }
 
@@ -432,9 +454,6 @@ mod tests {
 
     #[test]
     fn test() {
-        let result = BinaryOperation::tiny_parse(
-            TinyLexer::new("+ 42 +1 +2 fn mod mod mod hello world").unwrap(),
-        );
-        println!("{result:?}");
+        SelfRepetition::tiny_parse("++").unwrap();
     }
 }
