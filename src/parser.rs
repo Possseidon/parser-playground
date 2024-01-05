@@ -90,7 +90,8 @@ macro_rules! impl_enum_parse {
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
 
         impl $Name<Tiny> {
-            fn tiny_parse(mut lexer: TinyLexer) -> Result<Self, FatalLexerError> {
+            fn tiny_parse(code: &str) -> Result<Self, FatalLexerError> {
+                let mut lexer = TinyLexer::new(code)?;
                 check_expected!(lexer (Expect {
                     tokens: Self::EXPECTED_TOKENS.tokens,
                     or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
@@ -334,7 +335,8 @@ macro_rules! impl_struct_parse {
             const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
 
             impl $Name<Tiny> {
-                fn tiny_parse(mut lexer: TinyLexer) -> Result<Self, FatalLexerError> {
+                fn tiny_parse(code: &str) -> Result<Self, FatalLexerError> {
+                    let mut lexer = TinyLexer::new(code)?;
                     check_expected!(lexer (Expect {
                         tokens: Self::EXPECTED_TOKENS.tokens,
                         or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
