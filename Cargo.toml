@@ -1,0 +1,11 @@
+[package]
+name = "parser-playground"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+enum-map = "2.7.3"
+paste = "1.0.14"
+smol_str = "0.2.0"
