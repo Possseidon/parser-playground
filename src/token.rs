@@ -438,12 +438,20 @@ impl TokenSet {
         Self(1 << kind as u8)
     }
 
-    pub(crate) const fn xor_without_ambiguity(self, other: Self) -> Self {
+    pub(crate) const fn xor_without_ambiguity_const(self, other: Self) -> Self {
         let merged = self.0 ^ other.0;
         if merged != self.0 | other.0 {
-            panic!("ambiguous token set")
+            panic!("ambiguous token set");
         }
         Self(merged)
+    }
+
+    pub(crate) fn xor_without_ambiguity(self, other: Self) -> Self {
+        let overlap = self.0 & other.0;
+        if overlap != 0 {
+            panic!("ambiguous token set because of {:?}", Self(overlap));
+        }
+        Self(self.0 | other.0)
     }
 
     pub(crate) const fn contains(self, kind: TokenKind) -> bool {
