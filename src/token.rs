@@ -144,27 +144,28 @@ impl_token_kind! {
     ">>=" ShrEq
     "..." DotDotDot
     "..=" DotDotEq
-    "&&"  AndAnd
-    "||"  OrOr
-    "<<"  Shl
-    ">>"  Shr
-    "+="  PlusEq
-    "-="  MinusEq
-    "*="  StarEq
-    "/="  SlashEq
-    "%="  PercentEq
-    "^="  CaretEq
-    "&="  AndEq
-    "|="  OrEq
-    "=="  EqEq
-    "!="  Ne
-    ">="  Ge
-    "<="  Le
-    ".."  DotDot
-    ".="  DotEq
-    "::"  PathSep
-    "->"  RArrow
-    "=>"  FatArrow
+
+    "&&" AndAnd
+    "||" OrOr
+    "<<" Shl
+    ">>" Shr
+    "+=" PlusEq
+    "-=" MinusEq
+    "*=" StarEq
+    "/=" SlashEq
+    "%=" PercentEq
+    "^=" CaretEq
+    "&=" AndEq
+    "|=" OrEq
+    "==" EqEq
+    "!=" Ne
+    ">=" Ge
+    "<=" Le
+    ".." DotDot
+    ".=" DotEq
+    "::" PathSep
+    "->" RArrow
+    "=>" FatArrow
 
 'chars:
     "+" b'+' Plus
