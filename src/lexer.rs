@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use smol_str::SmolStr;
 
-use crate::token::TokenKind;
+use crate::token::{TokenKind, TokenSet};
 
 #[derive(Debug)]
 pub(crate) struct TinyLexer<'code> {
@@ -30,6 +30,11 @@ impl<'code> TinyLexer<'code> {
     /// Peeks the kind of the next token.
     pub(crate) fn peek(&self) -> Option<TokenKind> {
         self.next.as_ref().map(|(kind, _)| *kind)
+    }
+
+    /// Peeks the kind of the next token and checks if it matches the given set.
+    pub(crate) fn peek_matches(&self, tokens: TokenSet) -> bool {
+        self.peek().map_or(false, |kind| tokens.contains(kind))
     }
 
     pub(crate) fn next_expected(&mut self) -> Result<TinyLexerToken, FatalLexerError> {
