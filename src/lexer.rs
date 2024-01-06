@@ -8,7 +8,7 @@ use crate::token::{TokenKind, TokenSet};
 pub(crate) struct TinyLexer<'code> {
     code: &'code str,
     pos: usize,
-    next: Option<(TokenKind, TinyLexerToken)>,
+    next: Option<(TokenKind, SmolStr)>,
 }
 
 impl<'code> TinyLexer<'code> {
@@ -37,7 +37,7 @@ impl<'code> TinyLexer<'code> {
         self.peek().map_or(false, |kind| tokens.contains(kind))
     }
 
-    pub(crate) fn next_expected(&mut self) -> Result<TinyLexerToken, FatalLexerError> {
+    pub(crate) fn next_expected(&mut self) -> Result<SmolStr, FatalLexerError> {
         self.next().expect("next token should be expected")
     }
 
@@ -53,10 +53,7 @@ impl<'code> TinyLexer<'code> {
         self.next = Some(if let Some(after_doc_comment) = rest.strip_prefix("///") {
             let comment_len = find_line_break(after_doc_comment) + 3;
             self.pos += comment_len;
-            (
-                TokenKind::DocComment,
-                TinyLexerToken(rest[..comment_len].into()),
-            )
+            (TokenKind::DocComment, rest[..comment_len].into())
         } else if let Some(after_initial_digit) = rest.strip_prefix(|c: char| c.is_ascii_digit()) {
             if let Some(after_base) =
                 after_initial_digit.strip_prefix(['B', 'b', 'O', 'o', 'X', 'x'])
@@ -65,7 +62,7 @@ impl<'code> TinyLexer<'code> {
                     after_base.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
                 let len = rest.len() - end.len();
                 self.pos += len;
-                (TokenKind::Integer, TinyLexerToken(rest[..len].into()))
+                (TokenKind::Integer, rest[..len].into())
             } else {
                 let mut token_kind = TokenKind::Integer;
                 let mut after_digits = after_initial_digit
@@ -90,7 +87,7 @@ impl<'code> TinyLexer<'code> {
 
                 let len = rest.len() - end.len();
                 self.pos += len;
-                (token_kind, TinyLexerToken(rest[..len].into()))
+                (token_kind, rest[..len].into())
             }
         } else if let Some(after_quote) = rest.strip_prefix('\'') {
             // Implementing label detection can be kindof hard to wrap your head around.
@@ -129,55 +126,55 @@ impl<'code> TinyLexer<'code> {
                 let end = lex_quoted(after_ident_chars, '\'', FatalLexerError)?;
                 let len = rest.len() - end.len();
                 self.pos += len;
-                (TokenKind::Char, TinyLexerToken(rest[..len].into()))
+                (TokenKind::Char, (rest[..len].into()))
             } else {
                 let len = rest.len() - after_ident_chars.len();
                 self.pos += len;
-                (TokenKind::Label, TinyLexerToken(rest[..len].into()))
+                (TokenKind::Label, rest[..len].into())
             }
         } else if let Some(after_quote) = rest.strip_prefix("b'") {
             let end = lex_quoted(after_quote, '\'', FatalLexerError)?;
             let len = rest.len() - end.len();
             self.pos += len;
-            (TokenKind::Char, TinyLexerToken(rest[..len].into()))
+            (TokenKind::Char, rest[..len].into())
         } else if let Some(after_quote) = rest.strip_prefix('"') {
             let end = lex_quoted(after_quote, '\"', FatalLexerError)?;
             let len = rest.len() - end.len();
             self.pos += len;
-            (TokenKind::String, TinyLexerToken(rest[..len].into()))
+            (TokenKind::String, rest[..len].into())
         } else if let Some(after_quote) = rest.strip_prefix("b\"") {
             let end = lex_quoted(after_quote, '\"', FatalLexerError)?;
             let len = rest.len() - end.len();
             self.pos += len;
-            (TokenKind::String, TinyLexerToken(rest[..len].into()))
+            (TokenKind::String, rest[..len].into())
         } else if rest.starts_with("r#") || rest.starts_with("r\"") {
             let end = lex_raw_string(&rest[1..])?;
             let len = rest.len() - end.len();
             self.pos += len;
-            (TokenKind::String, TinyLexerToken(rest[..len].into()))
+            (TokenKind::String, rest[..len].into())
         } else if rest.starts_with("br#") || rest.starts_with("br\"") {
             let end = lex_raw_string(&rest[2..])?;
             let len = rest.len() - end.len();
             self.pos += len;
-            (TokenKind::String, TinyLexerToken(rest[..len].into()))
+            (TokenKind::String, rest[..len].into())
         } else if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
             let ident_len = rest
                 .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .unwrap_or(rest.len());
             self.pos += ident_len;
             if let Some(keyword) = TokenKind::parse_keyword(rest[..ident_len].as_bytes()) {
-                (keyword, TinyLexerToken::EMPTY)
+                (keyword, SmolStr::new_inline(""))
             } else {
-                (TokenKind::Ident, TinyLexerToken(rest[..ident_len].into()))
+                (TokenKind::Ident, rest[..ident_len].into())
             }
         } else if let Some((symbol, len)) = TokenKind::parse_symbol(rest.as_bytes()) {
             self.pos += len;
-            (symbol, TinyLexerToken::EMPTY)
+            (symbol, SmolStr::new_inline(""))
         } else {
             self.pos += 1;
             (
                 TokenKind::parse_char(rest.as_bytes()[0]).ok_or(FatalLexerError)?,
-                TinyLexerToken::EMPTY,
+                SmolStr::new_inline(""),
             )
         });
 
@@ -272,14 +269,6 @@ fn lex_raw_string(after_r: &str) -> Result<&str, FatalLexerError> {
     }
 }
 
-/// Only contains text for dynamic tokens.
-#[derive(Clone, Debug)]
-pub(crate) struct TinyLexerToken(pub(crate) SmolStr);
-
-impl TinyLexerToken {
-    const EMPTY: TinyLexerToken = TinyLexerToken(SmolStr::new_inline(""));
-}
-
 /// Some error occured during tiny lexing.
 ///
 /// Always fatal; afterwards the iterator will be empty and yield `None`.
@@ -290,7 +279,7 @@ impl TinyLexerToken {
 pub(crate) struct FatalLexerError;
 
 impl Iterator for TinyLexer<'_> {
-    type Item = Result<TinyLexerToken, FatalLexerError>;
+    type Item = Result<SmolStr, FatalLexerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let Some((_, token)) = self.next.take() else {

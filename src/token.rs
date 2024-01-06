@@ -4,7 +4,7 @@ use enum_map::Enum;
 use paste::paste;
 use smol_str::SmolStr;
 
-use crate::lexer::{PositionedLexerToken, TinyLexerToken};
+use crate::lexer::PositionedLexerToken;
 
 macro_rules! impl_token_kind {
     (
@@ -59,45 +59,49 @@ macro_rules! impl_token_kind {
             }
         }
 
-        $(
-            #[derive(Clone, Copy, Debug)]
-            pub(crate) struct $Dynamic;
+        pub(crate) mod token {
+            use super::{Kind, Style, TokenKind};
 
-            impl Kind for $Dynamic {
-                const KIND: TokenKind = TokenKind::$Dynamic;
-                type Repr<S: Style> = S::Dynamic<Self>;
-            }
-        )*
+            $(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                pub(crate) struct $Dynamic;
 
-        $(
-            #[derive(Clone, Copy, Debug)]
-            pub(crate) struct $Keyword;
+                impl Kind for $Dynamic {
+                    const KIND: TokenKind = TokenKind::$Dynamic;
+                    type Repr<S: Style> = S::Dynamic<Self>;
+                }
+            )*
 
-            impl Kind for $Keyword {
-                const KIND: TokenKind = TokenKind::$Keyword;
-                type Repr<S: Style> = S::Fixed<Self>;
-            }
-        )*
+            $(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                pub(crate) struct $Keyword;
 
-        $(
-            #[derive(Clone, Copy, Debug)]
-            pub(crate) struct $Symbol;
+                impl Kind for $Keyword {
+                    const KIND: TokenKind = TokenKind::$Keyword;
+                    type Repr<S: Style> = S::Fixed<Self>;
+                }
+            )*
 
-            impl Kind for $Symbol {
-                const KIND: TokenKind = TokenKind::$Symbol;
-                type Repr<S: Style> = S::Fixed<Self>;
-            }
-        )*
+            $(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                pub(crate) struct $Symbol;
 
-        $(
-            #[derive(Clone, Copy, Debug)]
-            pub(crate) struct $Char;
+                impl Kind for $Symbol {
+                    const KIND: TokenKind = TokenKind::$Symbol;
+                    type Repr<S: Style> = S::Fixed<Self>;
+                }
+            )*
 
-            impl Kind for $Char {
-                const KIND: TokenKind = TokenKind::$Char;
-                type Repr<S: Style> = S::Fixed<Self>;
-            }
-        )*
+            $(
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                pub(crate) struct $Char;
+
+                impl Kind for $Char {
+                    const KIND: TokenKind = TokenKind::$Char;
+                    type Repr<S: Style> = S::Fixed<Self>;
+                }
+            )*
+        }
     };
 }
 
@@ -208,13 +212,13 @@ impl TokenKind {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TinyFixedTokenRepr<K: Kind> {
     _kind: PhantomData<*const K>,
 }
 
 impl<K: Kind> TinyToken for TinyFixedTokenRepr<K> {
-    fn new(_token: TinyLexerToken) -> Self {
+    fn new(_text: SmolStr) -> Self {
         Self { _kind: PhantomData }
     }
 
@@ -223,16 +227,16 @@ impl<K: Kind> TinyToken for TinyFixedTokenRepr<K> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TinyDynamicTokenRepr<K: Kind> {
     text: SmolStr,
     _kind: PhantomData<*const K>,
 }
 
 impl<K: Kind> TinyToken for TinyDynamicTokenRepr<K> {
-    fn new(token: TinyLexerToken) -> Self {
+    fn new(text: SmolStr) -> Self {
         Self {
-            text: token.0,
+            text,
             _kind: PhantomData,
         }
     }
@@ -242,7 +246,7 @@ impl<K: Kind> TinyToken for TinyDynamicTokenRepr<K> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PositionedFixedTokenRepr<K: Kind> {
     pos: usize,
     trailing_whitespace_len: usize,
@@ -271,7 +275,7 @@ impl<K: Kind> PositionedToken for PositionedFixedTokenRepr<K> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PositionedDynamicTokenRepr<K: Kind> {
     pos: usize,
     len: NonZeroUsize,
@@ -306,12 +310,12 @@ impl<K: Kind> PositionedToken for PositionedDynamicTokenRepr<K> {
 ///
 /// Trait bounds on [`Clone`] and [`Debug`] are a hack to simplify `#[derive(Clone, Debug)]` on AST
 /// node types.
-pub(crate) trait Style: Clone + fmt::Debug {
-    type Fixed<K: Kind>: Clone + fmt::Debug;
-    type Dynamic<K: Kind>: Clone + fmt::Debug;
+pub(crate) trait Style: Clone + fmt::Debug + PartialEq + std::cmp::Eq {
+    type Fixed<K: Kind>: Clone + fmt::Debug + PartialEq + std::cmp::Eq;
+    type Dynamic<K: Kind>: Clone + fmt::Debug + PartialEq + std::cmp::Eq;
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Tiny;
 
 impl Style for Tiny {
@@ -319,7 +323,7 @@ impl Style for Tiny {
     type Dynamic<K: Kind> = TinyDynamicTokenRepr<K>;
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Positioned;
 
 impl Style for Positioned {
@@ -327,9 +331,9 @@ impl Style for Positioned {
     type Dynamic<K: Kind> = PositionedDynamicTokenRepr<K>;
 }
 
-pub(crate) trait Kind: Clone + Copy + fmt::Debug {
+pub(crate) trait Kind: Clone + Copy + fmt::Debug + PartialEq + std::cmp::Eq {
     const KIND: TokenKind;
-    type Repr<S: Style>: Clone + fmt::Debug;
+    type Repr<S: Style>: Clone + fmt::Debug + PartialEq + std::cmp::Eq;
 }
 
 /// Very small memory footprint for parsing, but is not capable of producing good error messages.
@@ -346,10 +350,7 @@ pub(crate) trait Kind: Clone + Copy + fmt::Debug {
 /// Formatting is not supported, since this representation loses all information about whitespace,
 /// including comments.
 pub(crate) trait TinyToken: Clone {
-    /// Assumes that the current token has the correct kind.
-    ///
-    /// This check should already have happened via `EXPECTED_TOKENS`.
-    fn new(token: TinyLexerToken) -> Self;
+    fn new(text: SmolStr) -> Self;
     fn text(self) -> SmolStr;
 }
 
@@ -382,12 +383,23 @@ impl<K: Kind, S: Style> Clone for Token<K, S> {
 
 impl<K: Kind, S: Style> Copy for Token<K, S> where K::Repr<S>: Copy {}
 
+impl<K: Kind, S: Style> PartialEq for Token<K, S>
+where
+    K::Repr<S>: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<K: Kind, S: Style> std::cmp::Eq for Token<K, S> where K::Repr<S>: std::cmp::Eq {}
+
 impl<K: Kind> TinyToken for Token<K, Tiny>
 where
     K::Repr<Tiny>: TinyToken,
 {
-    fn new(token: TinyLexerToken) -> Self {
-        Self(<K::Repr<Tiny> as TinyToken>::new(token))
+    fn new(text: SmolStr) -> Self {
+        Self(<K::Repr<Tiny> as TinyToken>::new(text))
     }
 
     fn text(self) -> SmolStr {
