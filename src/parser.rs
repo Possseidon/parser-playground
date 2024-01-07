@@ -121,6 +121,14 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// This is very fast, but might lead to a stack overflow for deeply nested code. To avoid
     /// crashes for e.g. untrusted input, use [`TinyParse::tiny_parse_safe()`] or better yet
     /// [`TinyParse::tiny_parse_with_depth()`] to also limit execution time.
+    ///
+    /// One could add a `max_recursion` limit here, similar to `max_depth` in
+    /// [`TinyParse::tiny_parse_with_depth()`], but that can't really provide any guarantees, since
+    /// the stack might already be almost full despite a low limit.
+    ///
+    /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
+    /// check to slow down parsing (even though it probably wouldn't be much). I might look into
+    /// this again in the future, but for now I'll keep it as is.
     fn tiny_parse_fast(code: &str) -> Result<Self, FatalLexerError> {
         let mut lexer = TinyLexer::new(code)?;
         let expect = Self::tiny_prepare_lexer(&mut lexer)?;
