@@ -186,9 +186,9 @@ impl<'code> TinyLexer<'code> {
             match self.code[self.pos..].bytes().next() {
                 None => break Ok(true),
                 Some(c) if c.is_ascii_whitespace() => {
-                    self.pos += self.code[self.pos + 1..]
+                    self.pos = self.code[self.pos + 1..]
                         .find(|c: char| !c.is_ascii_whitespace())
-                        .map_or(self.code.len(), |len| len + 1);
+                        .map_or(self.code.len(), |len| self.pos + len + 1);
                 }
                 Some(b'/') => {
                     if self.code[self.pos + 1..].starts_with("//") {
