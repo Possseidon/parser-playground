@@ -575,20 +575,18 @@ macro_rules! tiny_parse_by_mode_iterative {
 }
 
 macro_rules! expect_field_by_nested_token_set {
-    ( $nested_token_set:ident $expect:tt) => {
+    ( $nested_token_set:ident $expect:ident ) => {
         if $nested_token_set.exhaustive {
             Expect {
                 tokens: $nested_token_set.tokens,
                 or_end_of_input: false,
             }
         } else {
-            let expect = $expect;
             Expect {
-                // TODO: Check this at compile time (pretty sure it should be possible)
                 tokens: $nested_token_set
                     .tokens
-                    .xor_without_ambiguity(expect.tokens),
-                or_end_of_input: expect.or_end_of_input,
+                    .xor_without_ambiguity($expect.tokens),
+                or_end_of_input: $expect.or_end_of_input,
             }
         }
     };
