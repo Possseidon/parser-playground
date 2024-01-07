@@ -433,7 +433,7 @@ macro_rules! expected_tokens {
 }
 
 macro_rules! check_expected {
-    ( $lexer:ident $expect:tt ) => { {
+    ( $lexer:ident $expect:tt ) => {{
         let expect = $expect;
         if let Some(next_token) = $lexer.peek() {
             if !expect.tokens.contains(next_token) {
@@ -442,7 +442,7 @@ macro_rules! check_expected {
         } else if !expect.or_end_of_input {
             return Err(FatalLexerError);
         }
-    } };
+    }};
 }
 
 macro_rules! tiny_parse_token {
@@ -497,32 +497,31 @@ macro_rules! tiny_parse_by_mode {
 }
 
 macro_rules! tiny_parse_node_repetition_iterative {
-    ( $Node:ident $lexer:ident $state:ident $field:ident $repetition:ident $matches:tt $expect:tt ) => { paste! {
+    ( $Node:ident $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident $matches:tt $expect:tt ) => { paste! {
         if !$repetition {
             NodeStack::<Tiny>::start_repetition(&mut $state.nodes.repetition, &mut $state.nodes.[<$Node:snake>]);
         }
         if $lexer.peek_matches($matches) {
-            let expect = $expect;
             $state.parsers.push(TinyParseFn {
                 parse: Self::tiny_parse_iterative,
-                expect,
+                expect: $original_expect,
                 field: $field,
                 repetition: true,
             });
-            tiny_parse_push_parser!($Node $state expect);
+            tiny_parse_push_parser!($Node $state $expect);
         }
     } };
 }
 
 macro_rules! tiny_parse_by_mode_iterative {
-    ( [$Token:ident] $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+    ( [$Token:ident] $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
         $state.tokens.push($lexer.next_expected()?);
         check_expected!($lexer $expect);
     } };
-    ( ($Node:ident) $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+    ( ($Node:ident) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
         tiny_parse_push_parser!($Node $state $expect);
     };
-    ( [$Token:ident?] $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+    ( [$Token:ident?] $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
         if $lexer.peek_matches($matches) {
             $state.tokens.push_some($lexer.next_expected()?);
             check_expected!($lexer $expect);
@@ -530,21 +529,23 @@ macro_rules! tiny_parse_by_mode_iterative {
             $state.tokens.push_none();
         }
     } };
-    ( ($Node:ident?) $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+    ( ($Node:ident?) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
         if $lexer.peek_matches($matches) {
+            $state.nodes.push_some();
             tiny_parse_push_parser!($Node $state $expect);
         } else {
             $state.nodes.push_none();
         }
     };
-    ( ($Node:ident[?]) $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+    ( ($Node:ident[?]) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
         if $lexer.peek_matches($matches) {
+            $state.nodes.push_some();
             tiny_parse_push_parser!($Node $state $expect);
         } else {
             $state.nodes.push_none();
         }
     };
-    ( [$Token:ident*] $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+    ( [$Token:ident*] $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
         // TODO: This snippet exists 3 times with slight variations, deduplicate it with a macro
         $state.tokens.start_repetition();
         while $lexer.peek_matches($matches) {
@@ -552,11 +553,11 @@ macro_rules! tiny_parse_by_mode_iterative {
             check_expected!($lexer $expect);
         }
     } };
-    ( ($Node:ident*) $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node_repetition_iterative!($Node $lexer $state $field $repetition $matches $expect)
+    ( ($Node:ident*) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_node_repetition_iterative!($Node $lexer $state $original_expect $field $repetition $matches $expect)
     };
-    ( ($Node:ident[*]) $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node_repetition_iterative!($Node $lexer $state $field $repetition $matches $expect)
+    ( ($Node:ident[*]) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_node_repetition_iterative!($Node $lexer $state $original_expect $field $repetition $matches $expect)
     };
 }
 
@@ -571,7 +572,9 @@ macro_rules! expect_field_by_nested_token_set {
             let expect = $expect;
             Expect {
                 // TODO: Check this at compile time (pretty sure it should be possible)
-                tokens: $nested_token_set.tokens.xor_without_ambiguity(expect.tokens),
+                tokens: $nested_token_set
+                    .tokens
+                    .xor_without_ambiguity(expect.tokens),
                 or_end_of_input: expect.or_end_of_input,
             }
         }
@@ -778,14 +781,16 @@ macro_rules! impl_struct_parse {
                     state.nodes.[<$Name:snake>].push(Self { $( $field, )* });
                     return Ok(());
                 }
-                state.parsers.push(TinyParseFn {
-                    parse: Self::tiny_parse_iterative,
-                    expect,
-                    field: field + 1,
-                    repetition: false,
-                });
+                if !repetition {
+                    state.parsers.push(TinyParseFn {
+                        parse: Self::tiny_parse_iterative,
+                        expect,
+                        field: field + 1,
+                        repetition: false,
+                    });
+                }
                 match [<$Name:snake>]::Field::from_usize(field) { $( [<$Name:snake>]::Field::[<$field:camel>] => {
-                    tiny_parse_by_mode_iterative!($Field lexer state field repetition match {
+                    tiny_parse_by_mode_iterative!($Field lexer state expect field repetition match {
                         Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
                     } { expect_field!($Field $Name $field expect) });
                 } )* }
@@ -854,9 +859,8 @@ macro_rules! impl_node_parse {
                 fields.pop().expect("fields should not be empty")
             }
 
-            fn push_some<T>(optional: &mut BitVec, fields: &mut Vec<T>, node: T) {
-                optional.push(true);
-                fields.push(node);
+            fn push_some(&mut self) {
+                self.optional.push(true);
             }
 
             fn push_none(&mut self) {
@@ -995,8 +999,13 @@ mod tests {
 
     #[test]
     fn test() {
-        // TODO: This thinks it's ambiguous even though tiny_parse_fast works as it should.
-        let result = Test::tiny_parse_safe("hello 42 1.0 2.0 3.0 fn, fn, fn fn fn, struct, mod, fn struct mod").unwrap();
+        // TODO: Sort macros
+        // TODO: Try running different parsers on strings generated by the Arbtirary crate.
+        // TODO: Can you prevent stack overflow using something in std::panic? In stable Rust?
+        let result = Test::tiny_parse_safe(
+            "hello 42 1.0 2.0 3.0 fn, fn, fn fn fn, struct, mod, fn struct mod",
+        )
+        .unwrap();
         println!("{result:#?}");
     }
 }
