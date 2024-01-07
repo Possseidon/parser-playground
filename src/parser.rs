@@ -433,15 +433,16 @@ macro_rules! expected_tokens {
 }
 
 macro_rules! check_expected {
-    ( $lexer:ident $expect:tt ) => {
+    ( $lexer:ident $expect:tt ) => { {
+        let expect = $expect;
         if let Some(next_token) = $lexer.peek() {
-            if !$expect.tokens.contains(next_token) {
+            if !expect.tokens.contains(next_token) {
                 return Err(FatalLexerError);
             }
-        } else if !$expect.or_end_of_input {
+        } else if !expect.or_end_of_input {
             return Err(FatalLexerError);
         }
-    };
+    } };
 }
 
 macro_rules! tiny_parse_token {
@@ -460,13 +461,9 @@ macro_rules! tiny_parse_node {
 
 macro_rules! tiny_parse_repetition {
     ( $tiny_parse_token_or_node:ident $Vec:ident $TokenOrNode:ident $lexer:ident $matches:tt $expect:tt ) => { {
-        let mut expect = $expect;
-        // I'm almost certain potential ambiguities on this runtime xor are already prevented by
-        // EXPECTED_TOKENS_FROM, but I'm not 100% sure.
-        expect.tokens = expect.tokens.xor_without_ambiguity($matches);
         let mut result = $Vec::new();
         while $lexer.peek_matches($matches) {
-            result.push($tiny_parse_token_or_node!($TokenOrNode $lexer expect));
+            result.push($tiny_parse_token_or_node!($TokenOrNode $lexer $expect));
         }
         result
     } };
@@ -504,11 +501,8 @@ macro_rules! tiny_parse_node_repetition_iterative {
         if !$repetition {
             NodeStack::<Tiny>::start_repetition(&mut $state.nodes.repetition, &mut $state.nodes.[<$Node:snake>]);
         }
-        let mut expect = $expect;
-        // I'm almost certain potential ambiguities on this runtime xor are already prevented by
-        // EXPECTED_TOKENS_FROM, but I'm not 100% sure.
-        expect.tokens = expect.tokens.xor_without_ambiguity($matches);
         if $lexer.peek_matches($matches) {
+            let expect = $expect;
             $state.parsers.push(TinyParseFn {
                 parse: Self::tiny_parse_iterative,
                 expect,
@@ -552,14 +546,10 @@ macro_rules! tiny_parse_by_mode_iterative {
     };
     ( [$Token:ident*] $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
         // TODO: This snippet exists 3 times with slight variations, deduplicate it with a macro
-        let mut expect = $expect;
-        // I'm almost certain potential ambiguities on this runtime xor are already prevented by
-        // EXPECTED_TOKENS_FROM, but I'm not 100% sure.
-        expect.tokens = expect.tokens.xor_without_ambiguity($matches);
         $state.tokens.start_repetition();
         while $lexer.peek_matches($matches) {
             $state.tokens.push($lexer.next_expected()?);
-            check_expected!($lexer expect);
+            check_expected!($lexer $expect);
         }
     } };
     ( ($Node:ident*) $lexer:ident $state:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
@@ -570,27 +560,68 @@ macro_rules! tiny_parse_by_mode_iterative {
     };
 }
 
+macro_rules! expect_field_by_nested_token_set {
+    ( $nested_token_set:ident $expect:tt) => {
+        if $nested_token_set.exhaustive {
+            Expect {
+                tokens: $nested_token_set.tokens,
+                or_end_of_input: false,
+            }
+        } else {
+            let expect = $expect;
+            Expect {
+                // TODO: Check this at compile time (pretty sure it should be possible)
+                tokens: $nested_token_set.tokens.xor_without_ambiguity(expect.tokens),
+                or_end_of_input: expect.or_end_of_input,
+            }
+        }
+    };
+}
+
 macro_rules! expect_next_field {
     ( $Name:ident $field:ident $expect:ident ) => {
         paste! {
             if let Some(next_field) = [<$Name:snake>]::Field::[<$field:camel>].next() {
                 let next_expected_tokens = Self::EXPECTED_TOKENS_FROM[next_field];
-                if next_expected_tokens.exhaustive {
-                    Expect {
-                        tokens: next_expected_tokens.tokens,
-                        or_end_of_input: false,
-                    }
-                } else {
-                    Expect {
-                        // TODO: Check this at compile time or at least in a test if possible.
-                        tokens: next_expected_tokens.tokens.xor_without_ambiguity($expect.tokens),
-                        or_end_of_input: $expect.or_end_of_input,
-                    }
-                }
+                expect_field_by_nested_token_set!(next_expected_tokens $expect)
             } else {
                 $expect
             }
         }
+    };
+}
+
+macro_rules! expect_same_field {
+    ( $Name:ident $field:ident $expect:ident ) => { paste! { {
+        let same_expected_tokens = Self::EXPECTED_TOKENS_FROM[[<$Name:snake>]::Field::[<$field:camel>]];
+        expect_field_by_nested_token_set!(same_expected_tokens $expect)
+    } } };
+}
+
+macro_rules! expect_field {
+    ( [$Token:ident] $Name:ident $field:ident $expect:ident ) => {
+        expect_next_field!($Name $field $expect)
+    };
+    ( ($Node:ident) $Name:ident $field:ident $expect:ident ) => {
+        expect_next_field!($Name $field $expect)
+    };
+    ( [$Token:ident?] $Name:ident $field:ident $expect:ident ) => {
+        expect_next_field!($Name $field $expect)
+    };
+    ( ($Node:ident?) $Name:ident $field:ident $expect:ident ) => {
+        expect_next_field!($Name $field $expect)
+    };
+    ( ($Node:ident[?]) $Name:ident $field:ident $expect:ident ) => {
+        expect_next_field!($Name $field $expect)
+    };
+    ( [$Token:ident*] $Name:ident $field:ident $expect:ident ) => {
+        expect_same_field!($Name $field $expect)
+    };
+    ( ($Node:ident*) $Name:ident $field:ident $expect:ident ) => {
+        expect_same_field!($Name $field $expect)
+    };
+    ( ($Node:ident[*]) $Name:ident $field:ident $expect:ident ) => {
+        expect_same_field!($Name $field $expect)
     };
 }
 
@@ -728,7 +759,7 @@ macro_rules! impl_struct_parse {
                 Ok(Self { $( $field: {
                     tiny_parse_by_mode!($Field lexer match {
                         Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
-                    } { expect_next_field!($Name $field expect) })
+                    } { expect_field!($Field $Name $field expect) })
                 }, )* })
             }
 
@@ -756,7 +787,7 @@ macro_rules! impl_struct_parse {
                 match [<$Name:snake>]::Field::from_usize(field) { $( [<$Name:snake>]::Field::[<$field:camel>] => {
                     tiny_parse_by_mode_iterative!($Field lexer state field repetition match {
                         Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
-                    } { expect_next_field!($Name $field expect) });
+                    } { expect_field!($Field $Name $field expect) });
                 } )* }
                 Ok(())
             }
