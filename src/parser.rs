@@ -117,6 +117,7 @@ trait TinyParseImpl: Sized {
     fn pop_final_node(nodes: &mut NodeStack<Tiny>) -> Self;
 }
 
+#[allow(private_bounds)]
 pub(crate) trait TinyParse: TinyParseImpl {
     /// Parses recursively.
     ///
@@ -282,7 +283,7 @@ macro_rules! impl_enum_parse {
         $( Nodes: [ $( $Node:ident, )* ] )?
     } ) => { paste! {
         #[derive(Clone, Debug, PartialEq, Eq)]
-        enum $Name<S: Style> {
+        pub(crate) enum $Name<S: Style> {
             $( $( $Token(Token<token::$Token, S>), )* )?
             $( $( $Node($Node<S>), )* )?
         }
@@ -658,7 +659,7 @@ macro_rules! impl_struct_parse {
             }
         }
 
-        struct $Name<S: Style> {
+        pub(crate) struct $Name<S: Style> {
            $( $field: field_type!($Field), )*
         }
 
