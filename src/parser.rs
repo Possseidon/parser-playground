@@ -12,9 +12,6 @@ use crate::{
     token::{token, Style, Tiny, TinyToken, Token, TokenKind, TokenSet},
 };
 
-// TODO: While the parser itself can be iterative, Drop will still panic I think.
-//       I need to implement a custom drop for every type that does magic.
-
 enum ParseErrorKind {
     TokensExpectedFoundEndOfInput {
         expected: TokenSet,
@@ -365,6 +362,15 @@ macro_rules! impl_enum_parse {
 
             impl_pop_final_node!($Name);
         }
+
+        impl<S: Style> $Name<S> {
+            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
+                match self {
+                    $( $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )* )?
+                    _ => {}
+                }
+            }
+        }
     } };
 }
 
@@ -672,6 +678,29 @@ macro_rules! reverse {
     };
 }
 
+macro_rules! drain_field_into_dropped_nodes {
+    ( [$Token:ident] $nodes:ident $self:ident $field:ident ) => {};
+    ( ($Node:ident) $nodes:ident $self:ident $field:ident ) => {};
+    ( [$Token:ident?] $nodes:ident $self:ident $field:ident ) => {};
+    ( ($Node:ident?) $nodes:ident $self:ident $field:ident ) => {};
+    ( ($Node:ident[?]) $nodes:ident $self:ident $field:ident ) => {
+        paste! {
+            $nodes.[<$Node:snake>].extend($self.$field.take().map(|node| *node));
+        }
+    };
+    ( [$Token:ident*] $nodes:ident $self:ident $field:ident ) => {};
+    ( ($Node:ident*) $nodes:ident $self:ident $field:ident ) => {
+        paste! {
+            $nodes.[<$Node:snake>].extend($self.$field.drain(..));
+        }
+    };
+    ( ($Node:ident[*]) $nodes:ident $self:ident $field:ident ) => {
+        paste! {
+            $nodes.[<$Node:snake>].extend($self.$field.drain(..));
+        }
+    };
+}
+
 macro_rules! impl_struct_parse {
     ( $Name:ident {
         $( $field:ident: $Field:tt, )*
@@ -799,6 +828,19 @@ macro_rules! impl_struct_parse {
 
             impl_pop_final_node!($Name);
         }
+
+        impl<S: Style> $Name<S> {
+            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
+                $( drain_field_into_dropped_nodes!($Field nodes self $field); )*
+            }
+        }
+
+        impl<S: Style> Drop for $Name<S> {
+            fn drop(&mut self) {
+                let mut nodes = DroppedNodes::new();
+                self.drain_into_dropped_nodes(&mut nodes);
+            }
+        }
     } };
 }
 
@@ -820,6 +862,37 @@ macro_rules! impl_node_parse {
             kinds: Kinds,
             optional: BitVec,
             repetition: Repetition,
+        }
+
+        /// Used to avoid recursion on dropping of nodes.
+        struct DroppedNodes<S: Style> {
+            $( [<$Name:snake>]: Vec<$Name<S>>, )*
+        }
+
+        impl<S: Style> DroppedNodes<S> {
+            fn new() -> Self {
+                Self { $( [<$Name:snake>]: Vec::new(), )* }
+            }
+        }
+
+        impl<S: Style> Drop for DroppedNodes<S> {
+            fn drop(&mut self) {
+                loop {
+                    let mut empty = true;
+
+                    $(
+                        // must check empty before the loop, since a later field might push
+                        empty &= self.[<$Name:snake>].is_empty();
+                        while let Some(mut node) = self.[<$Name:snake>].pop() {
+                            node.drain_into_dropped_nodes(self);
+                        }
+                    )*
+
+                    if empty {
+                        break;
+                    }
+                }
+            }
         }
 
         impl<S: Style> Default for NodeStack<S> {
