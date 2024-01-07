@@ -560,7 +560,6 @@ macro_rules! tiny_parse_by_mode_iterative {
         }
     };
     ( [$Token:ident*] $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
-        // TODO: This snippet exists 3 times with slight variations, deduplicate it with a macro
         $state.tokens.start_repetition();
         while $lexer.peek_matches($matches) {
             $state.tokens.push($lexer.next_expected()?);
