@@ -294,6 +294,13 @@ macro_rules! impl_enum_parse {
                     $( $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )* )?
                     $( $( .xor_without_ambiguity_const($Node::<S>::EXPECTED_TOKENS) )* )?
             };
+
+            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
+                match self {
+                    $( $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )* )?
+                    _ => {}
+                }
+            }
         }
 
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
@@ -364,15 +371,6 @@ macro_rules! impl_enum_parse {
             }
 
             impl_pop_final_node!($Name);
-        }
-
-        impl<S: Style> $Name<S> {
-            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
-                match self {
-                    $( $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )* )?
-                    _ => {}
-                }
-            }
         }
     } };
 }
@@ -769,6 +767,10 @@ macro_rules! impl_struct_parse {
                 let tokens = NestedTokenSet::new();
                 until_required!(tokens $( $Field )* )
             };
+
+            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
+                $( drain_field_into_dropped_nodes!($Field nodes self $field); )*
+            }
         }
 
         const _: EnumMap<[<$Name:snake>]::Field, TokenSet> = $Name::<Tiny>::EXPECTED_TOKENS_AT;
@@ -827,12 +829,6 @@ macro_rules! impl_struct_parse {
             }
 
             impl_pop_final_node!($Name);
-        }
-
-        impl<S: Style> $Name<S> {
-            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
-                $( drain_field_into_dropped_nodes!($Field nodes self $field); )*
-            }
         }
 
         impl<S: Style> Drop for $Name<S> {
