@@ -52,14 +52,14 @@ impl NestedTokenSet {
     pub(crate) const fn xor_without_ambiguity_const(self, other: Self) -> Self {
         Self {
             tokens: self.tokens.xor_without_ambiguity_const(other.tokens),
-            exhaustive: self.exhaustive && other.exhaustive,
+            exhaustive: self.exhaustive || other.exhaustive,
         }
     }
 
     pub(crate) fn xor_without_ambiguity(self, other: Self) -> Self {
         Self {
             tokens: self.tokens.xor_without_ambiguity(other.tokens),
-            exhaustive: self.exhaustive && other.exhaustive,
+            exhaustive: self.exhaustive || other.exhaustive,
         }
     }
 
