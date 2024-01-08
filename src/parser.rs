@@ -295,6 +295,11 @@ macro_rules! impl_enum_parse {
                     $( $( .xor_without_ambiguity_const($Node::<S>::EXPECTED_TOKENS) )* )?
             };
 
+            const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = NodeSet {
+                $( $( [<$Node:snake>]: true, )* )?
+                ..NodeSet::new()
+            };
+
             fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
                 match self {
                     $( $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )* )?
@@ -699,6 +704,45 @@ macro_rules! drain_field_into_dropped_nodes {
     };
 }
 
+macro_rules! ensure_no_recursive_node_repetition_impl {
+    ( $Name:ident $Field:ident $field:ident ) => { paste! {
+        if !$Name::<Tiny>::EXPECTED_TOKENS_FROM.as_array()[[<$Name:snake>]::Field::[<$field:camel>] as usize].exhaustive  {
+            let mut banned_nodes = NodeSet::new();
+            banned_nodes.[<$Name:snake>] = true;
+            let mut start_nodes = NodeSet::new();
+            start_nodes.[<$Field:snake>] = true;
+            if start_nodes.any_recursive_node(banned_nodes, NodeSet::new()) {
+                panic!(concat!("non-exhaustive repetition ", stringify!($Name), "::", stringify!($field), " causes ambiguity due to cycle"));
+            }
+        }
+    } };
+}
+
+macro_rules! ensure_no_recursive_node_repetition {
+    ( $Name:ident ($Field:ident*) $field:ident ) => {
+        ensure_no_recursive_node_repetition_impl!($Name $Field $field)
+    };
+    ( $Name:ident ($Field:ident[*]) $field:ident ) => {
+        ensure_no_recursive_node_repetition_impl!($Name $Field $field)
+    };
+    ( $Name:ident $Field:tt $field:ident ) => {};
+}
+
+macro_rules! if_node {
+    ( ($Node:ident $( $kind:tt )? ) $stmt:tt ) => {
+        $stmt
+    };
+    ( [$Token:ident $( $kind:tt )? ] $stmt:tt ) => {};
+}
+
+macro_rules! nodes_dot_field {
+    ( $nodes:ident ($Field:ident $( $kind:tt )? ) ) => {
+        paste! {
+            $nodes.[<$Field:snake>]
+        }
+    };
+}
+
 macro_rules! impl_struct_parse {
     ( $Name:ident {
         $( $field:ident: $Field:tt, )*
@@ -768,6 +812,17 @@ macro_rules! impl_struct_parse {
                 until_required!(tokens $( $Field )* )
             };
 
+            const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = {
+                let mut nodes = NodeSet::new();
+                $( if_node!($Field {
+                    let index = [<$Name:snake>]::Field::[<$field:camel>] as usize;
+                    let is_non_exhaustive = !Self::EXPECTED_TOKENS_FROM.as_array()[index].exhaustive;
+                    let is_last_required = index + 1 == [<$Name:snake>]::Field::LENGTH || !Self::EXPECTED_TOKENS_FROM.as_array()[index + 1].exhaustive;
+                    nodes_dot_field!(nodes $Field) |= is_non_exhaustive || is_last_required;
+                }); )*
+                nodes
+            };
+
             fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
                 $( drain_field_into_dropped_nodes!($Field nodes self $field); )*
             }
@@ -776,6 +831,7 @@ macro_rules! impl_struct_parse {
         const _: EnumMap<[<$Name:snake>]::Field, TokenSet> = $Name::<Tiny>::EXPECTED_TOKENS_AT;
         const _: EnumMap<[<$Name:snake>]::Field, NestedTokenSet> = $Name::<Tiny>::EXPECTED_TOKENS_FROM;
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
+        const _: () = { $( ensure_no_recursive_node_repetition!($Name $Field $field); )* };
 
         impl TinyParseImpl for $Name<Tiny> {
             fn tiny_prepare_lexer(lexer: &mut TinyLexer) -> Result<Expect, FatalLexerError> {
@@ -949,6 +1005,55 @@ macro_rules! impl_node_parse {
             fn pop_repetition<'a, T>(repetition: &mut SmallVec<[usize; 2]>, fields: &'a mut Vec<T>) -> impl ExactSizeIterator<Item = T> + 'a {
                 let start = repetition.pop().expect("repetitions should not be empty");
                 fields.drain(start..)
+            }
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        struct NodeSet {
+            $( [<$Name:snake>]: bool, )*
+        }
+
+        impl NodeSet {
+            const fn new() -> Self {
+                Self {
+                    $( [<$Name:snake>]: false, )*
+                }
+            }
+
+            const fn is_empty(self) -> bool {
+                true
+                    $( && !self.[<$Name:snake>] )*
+            }
+
+            const fn any_recursive_node(self, banned_node: NodeSet, mut checked_nodes: NodeSet) -> bool {
+                if self.contains_any(banned_node) {
+                    return true;
+                }
+                checked_nodes = checked_nodes.add(self);
+
+                let mut recursive_nodes = Self::new();
+
+                $( if self.[<$Name:snake>] {
+                    recursive_nodes = recursive_nodes.add($Name::<Tiny>::LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES);
+                } )*
+
+                recursive_nodes = recursive_nodes.remove(checked_nodes);
+                !recursive_nodes.is_empty() && recursive_nodes.any_recursive_node(banned_node, checked_nodes)
+            }
+
+            const fn add(self, nodes: NodeSet) -> Self {
+                Self {
+                    $( [<$Name:snake>]: self.[<$Name:snake>] || nodes.[<$Name:snake>], )*
+                }
+            }
+            const fn remove(self, nodes: NodeSet) -> Self {
+                Self {
+                    $( [<$Name:snake>]: self.[<$Name:snake>] && !nodes.[<$Name:snake>], )*
+                }
+            }
+
+            const fn contains_any(self, nodes: NodeSet) -> bool {
+                $( self.[<$Name:snake>] && nodes.[<$Name:snake>] )||*
             }
         }
 
