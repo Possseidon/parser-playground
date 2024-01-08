@@ -961,94 +961,97 @@ macro_rules! impl_node_parse {
 }
 
 impl_node_parse! {
-    enum UnaryOperator {
-        Tokens: [
-            Not,
-            Minus,
-        ]
-    }
 
-    enum BinaryOperator {
-        Tokens: [
-            Plus,
-            // Minus,
-            // Star,
-            // Slash,
-            // Percent,
-            // Caret,
-            // And,
-            // Or,
-            // AndAnd,
-            // OrOr,
-            // Shl,
-            // Shr,
-            // PlusEq,
-            // MinusEq,
-            // StarEq,
-            // SlashEq,
-            // PercentEq,
-            // CaretEq,
-            // AndEq,
-            // OrEq,
-            // ShlEq,
-            // ShrEq,
-            // EqEq,
-            // Ne,
-            // Gt,
-            // Lt,
-            // Ge,
-            // Le,
-        ]
-    }
+enum UnaryOperator {
+    Tokens: [
+        Not,
+        Minus,
+    ]
+}
 
-    enum Literal {
-        Tokens: [
-            Integer,
-            Float,
-            // String,
-            // Char,
-        ]
-    }
+enum BinaryOperator {
+    Tokens: [
+        Plus,
+        // Minus,
+        // Star,
+        // Slash,
+        // Percent,
+        // Caret,
+        // And,
+        // Or,
+        // AndAnd,
+        // OrOr,
+        // Shl,
+        // Shr,
+        // PlusEq,
+        // MinusEq,
+        // StarEq,
+        // SlashEq,
+        // PercentEq,
+        // CaretEq,
+        // AndEq,
+        // OrEq,
+        // ShlEq,
+        // ShrEq,
+        // EqEq,
+        // Ne,
+        // Gt,
+        // Lt,
+        // Ge,
+        // Le,
+    ]
+}
 
-    struct SelfRepetition {
-        plus: [Plus],
-        more: (SelfRepetition[*]),
-    }
+enum Literal {
+    Tokens: [
+        Integer,
+        Float,
+        // String,
+        // Char,
+    ]
+}
 
-    struct Other {
-        a: [Ident*],
-        b: [Fn?],
-        c: [Plus],
-    }
+struct SelfRepetition {
+    l_paren: [LParen],
+    more: (SelfRepetition[*]),
+    r_paren: [RParen],
+}
 
-    struct StructNode {
-        fn_kw: [Fn],
-    }
+struct Other {
+    a: [Ident*],
+    b: [Fn?],
+    c: [Plus],
+}
 
-    enum EnumNode {
-        Tokens: [
-            Struct,
-            Mod,
-        ]
-        Nodes: [
-            StructNode,
-        ]
-    }
+struct StructNode {
+    fn_kw: [Fn],
+}
 
-    struct Test {
-        token: [Ident],
-        optional_token: [Integer?],
-        token_repetition: [Float*],
-        struct_node: (StructNode),
-        sep1: [Comma],
-        optional_struct_node: (StructNode?),
-        sep2: [Comma],
-        struct_node_repetition: (StructNode*),
-        sep3: [Comma],
-        enum_node: (EnumNode),
-        sep4: [Comma],
-        optional_enum_node: (EnumNode?),
-        sep5: [Comma],
-        enum_node_repetition: (EnumNode*),
-    }
+enum EnumNode {
+    Tokens: [
+        Struct,
+        Mod,
+    ]
+    Nodes: [
+        StructNode,
+    ]
+}
+
+struct Test {
+    token: [Ident],
+    optional_token: [Integer?],
+    token_repetition: [Float*],
+    struct_node: (StructNode),
+    sep1: [Comma],
+    optional_struct_node: (StructNode?),
+    sep2: [Comma],
+    struct_node_repetition: (StructNode*),
+    sep3: [Comma],
+    enum_node: (EnumNode),
+    sep4: [Comma],
+    optional_enum_node: (EnumNode?),
+    sep5: [Comma],
+    enum_node_repetition: (EnumNode*),
+}
+
 }
