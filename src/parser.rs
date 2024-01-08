@@ -909,7 +909,9 @@ macro_rules! impl_node_parse {
 
             /// Intentionally consumes self, signifying that this is the last operation.
             fn is_empty(self) -> bool {
-                $( self.[<$Name:snake>].is_empty() && )* self.optional.is_empty() && self.repetition.is_empty()
+                self.optional.is_empty()
+                    && self.repetition.is_empty()
+                    && $( self.[<$Name:snake>].is_empty() )&&*
             }
 
             fn push_kind(&mut self, kind: NodeKind) {
