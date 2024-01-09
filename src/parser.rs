@@ -683,9 +683,17 @@ macro_rules! reverse {
 
 macro_rules! drain_field_into_dropped_nodes {
     ( [$Token:ident] $nodes:ident $self:ident $field:ident ) => {};
-    ( ($Node:ident) $nodes:ident $self:ident $field:ident ) => {};
+    ( ($Node:ident) $nodes:ident $self:ident $field:ident ) => {
+        paste! {
+            $self.$field.drain_into_dropped_nodes($nodes);
+        }
+    };
     ( [$Token:ident?] $nodes:ident $self:ident $field:ident ) => {};
-    ( ($Node:ident?) $nodes:ident $self:ident $field:ident ) => {};
+    ( ($Node:ident?) $nodes:ident $self:ident $field:ident ) => {
+        paste! {
+            $self.$field.as_mut().map(|node| node.drain_into_dropped_nodes($nodes));
+        }
+    };
     ( ($Node:ident[?]) $nodes:ident $self:ident $field:ident ) => {
         paste! {
             $nodes.[<$Node:snake>].extend($self.$field.take().map(|node| *node));
