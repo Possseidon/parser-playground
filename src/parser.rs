@@ -511,7 +511,7 @@ macro_rules! tiny_parse_by_mode {
 macro_rules! tiny_parse_node_repetition_iterative {
     ( $Node:ident $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident $matches:tt $expect:tt ) => { paste! {
         if !$repetition {
-            NodeStack::<Tiny>::start_repetition(&mut $state.nodes.repetition, &mut $state.nodes.[<$Node:snake>]);
+            NodeStack::<Tiny>::start_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]);
         }
         if $lexer.peek_matches($matches) {
             $state.parsers.push(TinyParseFn {
@@ -648,19 +648,19 @@ macro_rules! tiny_parse_build_field {
         $state.tokens.pop_optional().map(Token::new)
     };
     ( ($Node:ident?) $state:ident ) => { paste! {
-        NodeStack::<Tiny>::pop_optional(&mut $state.nodes.optional, &mut $state.nodes.[<$Node:snake>])
+        NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>])
     } };
     ( ($Node:ident[?]) $state:ident ) => { paste! {
-        NodeStack::<Tiny>::pop_optional(&mut $state.nodes.optional, &mut $state.nodes.[<$Node:snake>]).map(Box::new)
+        NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>]).map(Box::new)
     } };
     ( [$Token:ident*] $state:ident ) => {{
         SmallVec::from_iter($state.tokens.pop_repetition().map(Token::new))
     }};
     ( ($Node:ident*) $state:ident ) => { paste! {
-        SmallVec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes.repetition, &mut $state.nodes.[<$Node:snake>]))
+        SmallVec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
     } };
     ( ($Node:ident[*]) $state:ident ) => { paste! {
-        Vec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes.repetition, &mut $state.nodes.[<$Node:snake>]))
+        Vec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
     } };
 }
 
@@ -919,9 +919,9 @@ macro_rules! impl_node_parse {
         #[derive(Clone, Debug, PartialEq, Eq)]
         struct NodeStack<S: Style> {
             $( [<$Name:snake>]: Vec<$Name<S>>, )*
-            kinds: Kinds,
-            optional: BitVec,
-            repetition: Repetition,
+            _kinds: Kinds,
+            _optional: BitVec,
+            _repetition: Repetition,
         }
 
         /// Used to avoid recursion on dropping of nodes.
@@ -965,25 +965,25 @@ macro_rules! impl_node_parse {
             fn new() -> Self {
                 Self {
                     $( [<$Name:snake>]: Vec::new(), )*
-                    kinds: Kinds::new(),
-                    optional: BitVec::new(),
-                    repetition: SmallVec::new(),
+                    _kinds: Kinds::new(),
+                    _optional: BitVec::new(),
+                    _repetition: SmallVec::new(),
                 }
             }
 
             /// Intentionally consumes self, signifying that this is the last operation.
             fn is_empty(self) -> bool {
-                self.optional.is_empty()
-                    && self.repetition.is_empty()
+                self._optional.is_empty()
+                    && self._repetition.is_empty()
                     && $( self.[<$Name:snake>].is_empty() )&&*
             }
 
             fn push_kind(&mut self, kind: NodeKind) {
-                self.kinds.push(kind);
+                self._kinds.push(kind);
             }
 
             fn pop_kind(&mut self) -> NodeKind {
-                self.kinds.pop().expect("kinds should not be empty")
+                self._kinds.pop().expect("kinds should not be empty")
             }
 
             fn push<T>(fields: &mut Vec<T>, node: T) {
@@ -995,11 +995,11 @@ macro_rules! impl_node_parse {
             }
 
             fn push_some(&mut self) {
-                self.optional.push(true);
+                self._optional.push(true);
             }
 
             fn push_none(&mut self) {
-                self.optional.push(false);
+                self._optional.push(false);
             }
 
             fn pop_optional<T>(optional: &mut BitVec, fields: &mut Vec<T>) -> Option<T> {
