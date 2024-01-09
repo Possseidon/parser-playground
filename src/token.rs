@@ -476,3 +476,84 @@ impl TokenSet {
             .filter(move |&kind| self.contains(kind))
     }
 }
+
+/// A full set of what to expected as the next token.
+///
+/// In addition to expecting any kind of node, it can also expect the end of the input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Expect {
+    pub(crate) tokens: TokenSet,
+    pub(crate) or_end_of_input: bool,
+}
+
+impl Expect {
+    /// Expects only the end of the input and no actual tokens.
+    pub(crate) const END_OF_INPUT: Self = Self {
+        tokens: TokenSet::new(),
+        or_end_of_input: true,
+    };
+}
+
+/// A set of tokens, as a flag for whether this set is exhaustive.
+///
+/// If a set is *not* exhaustive, the caller has to xor it with whatever he expects next.
+///
+/// Exhaustiveness is used by trailing optional and repetition fields on structs. Since those can
+/// match "nothing" and the struct itself does not know what would come next, it has to be passed in
+/// from the caller instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NestedTokenSet {
+    pub(crate) tokens: TokenSet,
+    pub(crate) exhaustive: bool,
+}
+
+impl NestedTokenSet {
+    pub(crate) const fn new() -> Self {
+        Self {
+            tokens: TokenSet::new(),
+            exhaustive: true,
+        }
+    }
+
+    pub(crate) const fn from_kind(kind: TokenKind) -> Self {
+        Self {
+            tokens: TokenSet::from_kind(kind),
+            exhaustive: true,
+        }
+    }
+
+    pub(crate) const fn xor_without_ambiguity_const(self, other: Self) -> Self {
+        Self {
+            tokens: self.tokens.xor_without_ambiguity_const(other.tokens),
+            exhaustive: self.exhaustive || other.exhaustive,
+        }
+    }
+
+    pub(crate) fn xor_without_ambiguity(self, other: Self) -> Self {
+        Self {
+            tokens: self.tokens.xor_without_ambiguity(other.tokens),
+            exhaustive: self.exhaustive || other.exhaustive,
+        }
+    }
+
+    pub(crate) const fn non_exhaustive(self) -> Self {
+        Self {
+            exhaustive: false,
+            ..self
+        }
+    }
+
+    pub(crate) fn expect(self, expect: Expect) -> Expect {
+        if self.exhaustive {
+            Expect {
+                tokens: self.tokens,
+                or_end_of_input: false,
+            }
+        } else {
+            Expect {
+                tokens: self.tokens.xor_without_ambiguity(self.tokens),
+                or_end_of_input: expect.or_end_of_input,
+            }
+        }
+    }
+}

@@ -7,9 +7,9 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::{
-    lexer::{FatalLexerError, TinyLexer},
+    lexer::{CheckedTinyTokenStream, FatalLexerError, IntoTinyTokenStream, TinyTokenStream},
     push_array::PushArray,
-    token::{token, Style, Tiny, TinyToken, Token, TokenKind, TokenSet},
+    token::{token, Expect, NestedTokenSet, Style, Tiny, TinyToken, Token, TokenKind, TokenSet},
 };
 
 enum ParseErrorKind {
@@ -28,54 +28,10 @@ struct ParseError {
     len: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct NestedTokenSet {
-    tokens: TokenSet,
-    exhaustive: bool,
-}
-
-impl NestedTokenSet {
-    pub(crate) const fn new() -> Self {
-        Self {
-            tokens: TokenSet::new(),
-            exhaustive: true,
-        }
-    }
-
-    pub(crate) const fn from_kind(kind: TokenKind) -> Self {
-        Self {
-            tokens: TokenSet::from_kind(kind),
-            exhaustive: true,
-        }
-    }
-
-    pub(crate) const fn xor_without_ambiguity_const(self, other: Self) -> Self {
-        Self {
-            tokens: self.tokens.xor_without_ambiguity_const(other.tokens),
-            exhaustive: self.exhaustive || other.exhaustive,
-        }
-    }
-
-    pub(crate) fn xor_without_ambiguity(self, other: Self) -> Self {
-        Self {
-            tokens: self.tokens.xor_without_ambiguity(other.tokens),
-            exhaustive: self.exhaustive || other.exhaustive,
-        }
-    }
-
-    pub(crate) const fn non_exhaustive(self) -> Self {
-        Self {
-            exhaustive: false,
-            ..self
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TinyParseFn {
+#[derive(Clone, Copy, Debug)]
+struct TinyParseFn<T: TinyTokenStream> {
     parse: fn(
-        lexer: &mut TinyLexer,
-        state: &mut TinyParseState,
+        state: &mut TinyParseState<T>,
         expect: Expect,
         field: usize,
         repetition: bool,
@@ -85,26 +41,85 @@ struct TinyParseFn {
     repetition: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TinyParseState {
-    parsers: Vec<TinyParseFn>,
+impl<T: TinyTokenStream> TinyParseFn<T> {
+    fn parse(self, state: &mut TinyParseState<T>) -> Result<(), FatalLexerError> {
+        (self.parse)(state, self.expect, self.field, self.repetition)
+    }
+}
+
+#[derive(Debug)]
+struct TinyParseState<T: TinyTokenStream> {
+    token_stream: CheckedTinyTokenStream<T>,
+    parsers: Vec<TinyParseFn<T>>,
     tokens: TinyTokenStack,
     nodes: NodeStack<Tiny>,
 }
 
+impl<T: TinyTokenStream> TinyParseState<T> {
+    fn new(token_stream: CheckedTinyTokenStream<T>) -> Self {
+        Self {
+            token_stream,
+            parsers: Vec::new(),
+            tokens: TinyTokenStack::new(),
+            nodes: NodeStack::new(),
+        }
+    }
+
+    fn push_parser<N: TinyParseImpl>(&mut self, expect: Expect) {
+        self.parsers.push(TinyParseFn {
+            parse: N::tiny_parse_iterative,
+            expect,
+            field: 0,
+            repetition: false,
+        })
+    }
+
+    fn push_build_enum<N: TinyParseImpl>(&mut self, expect: Expect) {
+        self.parsers.push(TinyParseFn {
+            parse: N::tiny_parse_iterative,
+            expect,
+            field: 1,
+            repetition: false,
+        });
+    }
+
+    fn push_next_field<N: TinyParseImpl>(&mut self, expect: Expect, field: usize) {
+        self.parsers.push(TinyParseFn {
+            parse: N::tiny_parse_iterative,
+            expect,
+            field: field + 1,
+            repetition: false,
+        });
+    }
+
+    fn push_repetition<N: TinyParseImpl>(&mut self, expect: Expect, field: usize) {
+        self.parsers.push(TinyParseFn {
+            parse: N::tiny_parse_iterative,
+            expect,
+            field,
+            repetition: true,
+        });
+    }
+}
+
 trait TinyParseImpl: Sized {
-    /// Prepares the lexer for parsing and returns the trailing [`Expect`] of this type.
-    ///
-    /// "Prepare" means, it checks the first token, since new tokens are always checked immediately.
-    fn tiny_prepare_lexer(lexer: &mut TinyLexer) -> Result<Expect, FatalLexerError>;
+    /// Which tokens are initially expected.
+    const EXPECTED_TOKENS: NestedTokenSet;
+
+    const INITIAL_EXPECT: Expect = Expect {
+        tokens: Self::EXPECTED_TOKENS.tokens,
+        or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
+    };
 
     /// Used by [`TinyParse::tiny_parse_fast()`].
-    fn tiny_parse_nested(lexer: &mut TinyLexer, expect: Expect) -> Result<Self, FatalLexerError>;
+    fn tiny_parse_nested(
+        token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>,
+        expect: Expect,
+    ) -> Result<Self, FatalLexerError>;
 
     /// Used by [`TinyParse::tiny_parse_safe()`] and [`TinyParse::tiny_parse_with_depth()`].
     fn tiny_parse_iterative(
-        lexer: &mut TinyLexer,
-        state: &mut TinyParseState,
+        state: &mut TinyParseState<impl TinyTokenStream>,
         expect: Expect,
         field: usize,
         repetition: bool,
@@ -129,10 +144,10 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
     /// this again in the future, but for now I'll keep it as is.
-    fn tiny_parse_fast(code: &str) -> Result<Self, FatalLexerError> {
-        let mut lexer = TinyLexer::new(code)?;
-        let expect = Self::tiny_prepare_lexer(&mut lexer)?;
-        Self::tiny_parse_nested(&mut lexer, expect)
+    fn tiny_parse_fast(token_stream: impl IntoTinyTokenStream) -> Result<Self, FatalLexerError> {
+        let mut token_stream =
+            CheckedTinyTokenStream::new(token_stream.into_iter(), Self::INITIAL_EXPECT)?;
+        Self::tiny_parse_nested(&mut token_stream, Expect::END_OF_INPUT)
     }
 
     /// Parses iteratively to avoid stack overflow.
@@ -142,39 +157,31 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// reasonable value.
     ///
     /// Simply calls [`TinyParse::tiny_parse_with_depth()`] with a maximum depth of [`usize::MAX`].
-    fn tiny_parse_safe(code: &str) -> Result<Self, FatalLexerError> {
-        Self::tiny_parse_with_depth(code, usize::MAX)
+    fn tiny_parse_safe(token_stream: impl IntoTinyTokenStream) -> Result<Self, FatalLexerError> {
+        Self::tiny_parse_with_depth(token_stream, usize::MAX)
     }
 
     /// Parses iteratively with a maximum depth to avoid long execution times.
-    fn tiny_parse_with_depth(code: &str, max_depth: usize) -> Result<Self, FatalLexerError> {
-        let mut lexer = TinyLexer::new(code)?;
-        let mut state = TinyParseState::default();
-        let expect = Self::tiny_prepare_lexer(&mut lexer)?;
-        Self::tiny_parse_iterative(&mut lexer, &mut state, expect, 0, false)?;
-        while let Some(TinyParseFn {
-            parse,
-            expect,
-            field,
-            repetition,
-        }) = state.parsers.pop()
-        {
-            parse(&mut lexer, &mut state, expect, field, repetition)?;
+    fn tiny_parse_with_depth(
+        token_stream: impl IntoTinyTokenStream,
+        max_depth: usize,
+    ) -> Result<Self, FatalLexerError> {
+        let mut state = TinyParseState::new(CheckedTinyTokenStream::new(
+            token_stream.into_iter(),
+            Self::INITIAL_EXPECT,
+        )?);
+        Self::tiny_parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
+        while let Some(parse_fn) = state.parsers.pop() {
+            parse_fn.parse(&mut state)?;
         }
-        assert!(state.tokens.is_empty());
+        assert!(state.tokens.is_empty(), "leftover tokens after parsing");
         let result = Self::pop_final_node(&mut state.nodes);
-        assert!(state.nodes.is_empty());
+        assert!(state.nodes.is_empty(), "leftover nodes after parsing");
         Ok(result)
     }
 }
 
 impl<T: TinyParseImpl> TinyParse for T {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Expect {
-    tokens: TokenSet,
-    or_end_of_input: bool,
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TinyTokenStack {
@@ -188,7 +195,7 @@ struct TinyTokenStack {
     ///
     /// If and only if `true` is pushed, there is also a matching entry in [`Self::dynamic`].
     optional: BitVec,
-    /// Contains the start index of a repetition in [`Self::dynamic`] and [`Self::tokens`].
+    /// Contains the start indices of a repetition in [`Self::dynamic`] and [`Self::tokens`].
     repetition: SmallVec<[[usize; 2]; 1]>,
 }
 
@@ -266,17 +273,6 @@ impl TinyTokenStack {
     }
 }
 
-macro_rules! tiny_parse_push_parser {
-    ( $Node:ident $state:ident $expect:tt ) => {
-        $state.parsers.push(TinyParseFn {
-            parse: $Node::tiny_parse_iterative,
-            expect: $expect,
-            field: 0,
-            repetition: false,
-        })
-    };
-}
-
 macro_rules! impl_enum_parse {
     ( $Name:ident {
         $( [$Token:ident], )*
@@ -289,12 +285,6 @@ macro_rules! impl_enum_parse {
         }
 
         impl<S: Style> $Name<S> {
-            const EXPECTED_TOKENS: NestedTokenSet = {
-                NestedTokenSet::new()
-                    $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )*
-                    $( .xor_without_ambiguity_const($Node::<S>::EXPECTED_TOKENS) )*
-            };
-
             const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = NodeSet {
                 $( [<$Node:snake>]: true, )*
                 ..NodeSet::new()
@@ -311,34 +301,28 @@ macro_rules! impl_enum_parse {
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
 
         impl TinyParseImpl for $Name<Tiny> {
-            fn tiny_prepare_lexer(lexer: &mut TinyLexer) -> Result<Expect, FatalLexerError> {
-                check_expected!(lexer (Expect {
-                    tokens: Self::EXPECTED_TOKENS.tokens,
-                    or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
-                }));
-                Ok(Expect {
-                    tokens: TokenSet::new(),
-                    or_end_of_input: true,
-                })
-            }
+            const EXPECTED_TOKENS: NestedTokenSet = {
+                NestedTokenSet::new()
+                    $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )*
+                    $( .xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS) )*
+            };
 
-            fn tiny_parse_nested(lexer: &mut TinyLexer, expect: Expect) -> Result<Self, FatalLexerError> {
-                let found = lexer.peek_expected();
+            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Result<Self, FatalLexerError> {
+                let found = token_stream.kind();
 
                 $( if found == TokenKind::$Token {
-                    return Ok(Self::$Token(tiny_parse_token!($Token lexer expect)));
+                    return Ok(Self::$Token(Token::<token::$Token, Tiny>::new(token_stream.next(expect)?)));
                 } )*
 
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    return Ok(Self::$Node(tiny_parse_node!($Node lexer expect)));
+                    return Ok(Self::$Node($Node::<Tiny>::tiny_parse_nested(token_stream, expect)?));
                 } )*
 
                 unreachable!("token should match one of the above cases");
             }
 
             fn tiny_parse_iterative(
-                lexer: &mut TinyLexer,
-                state: &mut TinyParseState,
+                state: &mut TinyParseState<impl TinyTokenStream>,
                 expect: Expect,
                 field: usize,
                 _repetition: bool,
@@ -352,23 +336,18 @@ macro_rules! impl_enum_parse {
                     return Ok(());
                 }
 
-                let found = lexer.peek_expected();
+                let found = state.token_stream.kind();
 
                 $( if found == TokenKind::$Token {
-                    state.nodes.[<$Name:snake>].push(Self::$Token(tiny_parse_token!($Token lexer expect)));
+                    state.nodes.[<$Name:snake>].push(Self::$Token(Token::<token::$Token, Tiny>::new(state.token_stream.next(expect)?)));
                     return Ok(());
                 } )*
 
-                state.parsers.push(TinyParseFn {
-                    parse: Self::tiny_parse_iterative,
-                    expect,
-                    field: 1,
-                    repetition: false,
-                });
+                state.push_build_enum::<Self>(expect);
 
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
                     state.nodes.push_kind(NodeKind::$Node);
-                    tiny_parse_push_parser!($Node state expect);
+                    state.push_parser::<$Node<Tiny>>(expect);
                     return Ok(());
                 } )*
 
@@ -444,149 +423,108 @@ macro_rules! expected_tokens {
     };
 }
 
-macro_rules! check_expected {
-    ( $lexer:ident $expect:tt ) => {{
-        let expect = $expect;
-        if let Some(next_token) = $lexer.peek() {
-            if !expect.tokens.contains(next_token) {
-                return Err(FatalLexerError);
-            }
-        } else if !expect.or_end_of_input {
-            return Err(FatalLexerError);
-        }
-    }};
-}
-
 macro_rules! tiny_parse_token {
-    ( $Token:ident $lexer:ident $expect:tt ) => {{
-        let token = $lexer.next_expected()?;
-        check_expected!($lexer $expect);
-        Token::<token::$Token, Tiny>::new(token)
+    ( $Token:ident $token_stream:ident $expect:tt ) => {{
+        Token::<token::$Token, Tiny>::new($token_stream.next($expect)?)
     }};
 }
 
 macro_rules! tiny_parse_node {
-    ( $Node:ident $lexer:ident $expect:tt ) => {
-        $Node::<Tiny>::tiny_parse_nested($lexer, $expect)?
+    ( $Node:ident $token_stream:ident $expect:tt ) => {
+        $Node::<Tiny>::tiny_parse_nested($token_stream, $expect)?
     };
 }
 
 macro_rules! tiny_parse_repetition {
-    ( $tiny_parse_token_or_node:ident $Vec:ident $TokenOrNode:ident $lexer:ident $matches:tt $expect:tt ) => { {
+    ( $tiny_parse_token_or_node:ident $Vec:ident $TokenOrNode:ident $token_stream:ident $matches:tt $expect:tt ) => { {
         let mut result = $Vec::new();
-        while $lexer.peek_matches($matches) {
-            result.push($tiny_parse_token_or_node!($TokenOrNode $lexer $expect));
+        while $token_stream.matches($matches) {
+            result.push($tiny_parse_token_or_node!($TokenOrNode $token_stream $expect));
         }
         result
     } };
 }
 
 macro_rules! tiny_parse_by_mode {
-    ( [$Token:ident] $lexer:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_token!($Token $lexer $expect)
+    ( [$Token:ident] $token_stream:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_token!($Token $token_stream $expect)
     };
-    ( ($Node:ident) $lexer:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node!($Node $lexer $expect)
+    ( ($Node:ident) $token_stream:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_node!($Node $token_stream $expect)
     };
-    ( [$Token:ident?] $lexer:ident match $matches:tt $expect:tt ) => {
-        if $lexer.peek_matches($matches) { Some(tiny_parse_token!($Token $lexer $expect)) } else { None }
+    ( [$Token:ident?] $token_stream:ident match $matches:tt $expect:tt ) => {
+        if $token_stream.matches($matches) { Some(tiny_parse_token!($Token $token_stream $expect)) } else { None }
     };
-    ( ($Node:ident?) $lexer:ident match $matches:tt $expect:tt ) => {
-        if $lexer.peek_matches($matches) { Some(tiny_parse_node!($Node $lexer $expect)) } else { None }
+    ( ($Node:ident?) $token_stream:ident match $matches:tt $expect:tt ) => {
+        if $token_stream.matches($matches) { Some(tiny_parse_node!($Node $token_stream $expect)) } else { None }
     };
-    ( ($Node:ident[?]) $lexer:ident match $matches:tt $expect:tt ) => {
-        if $lexer.peek_matches($matches) { Some(Box::new(tiny_parse_node!($Node $lexer $expect))) } else { None }
+    ( ($Node:ident[?]) $token_stream:ident match $matches:tt $expect:tt ) => {
+        if $token_stream.matches($matches) { Some(Box::new(tiny_parse_node!($Node $token_stream $expect))) } else { None }
     };
-    ( [$Token:ident*] $lexer:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_repetition!(tiny_parse_token SmallVec $Token $lexer $matches $expect)
+    ( [$Token:ident*] $token_stream:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_repetition!(tiny_parse_token SmallVec $Token $token_stream $matches $expect)
     };
-    ( ($Node:ident*) $lexer:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_repetition!(tiny_parse_node SmallVec $Node $lexer $matches $expect)
+    ( ($Node:ident*) $token_stream:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_repetition!(tiny_parse_node SmallVec $Node $token_stream $matches $expect)
     };
-    ( ($Node:ident[*]) $lexer:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_repetition!(tiny_parse_node Vec $Node $lexer $matches $expect)
+    ( ($Node:ident[*]) $token_stream:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_repetition!(tiny_parse_node Vec $Node $token_stream $matches $expect)
     };
 }
 
 macro_rules! tiny_parse_node_repetition_iterative {
-    ( $Node:ident $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident $matches:tt $expect:tt ) => { paste! {
+    ( $Node:ident $state:ident $original_expect:ident $field:ident $repetition:ident $matches:tt $expect:tt ) => { paste! {
         if !$repetition {
             NodeStack::<Tiny>::start_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]);
         }
-        if $lexer.peek_matches($matches) {
-            $state.parsers.push(TinyParseFn {
-                parse: Self::tiny_parse_iterative,
-                expect: $original_expect,
-                field: $field,
-                repetition: true,
-            });
-            tiny_parse_push_parser!($Node $state $expect);
+        if $state.token_stream.matches($matches) {
+            $state.push_repetition::<Self>($original_expect, $field);
+            $state.push_parser::<$Node<Tiny>>($expect);
         }
     } };
 }
 
 macro_rules! tiny_parse_by_mode_iterative {
-    ( [$Token:ident] $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
-        $state.tokens.push($lexer.next_expected()?);
-        check_expected!($lexer $expect);
+    ( [$Token:ident] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+        $state.tokens.push($state.token_stream.next($expect)?);
     } };
-    ( ($Node:ident) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_push_parser!($Node $state $expect);
+    ( ($Node:ident) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+        $state.push_parser::<$Node<Tiny>>($expect);
     };
-    ( [$Token:ident?] $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
-        if $lexer.peek_matches($matches) {
-            $state.tokens.push_some($lexer.next_expected()?);
-            check_expected!($lexer $expect);
+    ( [$Token:ident?] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+        if $state.token_stream.matches($matches) {
+            $state.tokens.push_some($state.token_stream.next($expect)?);
         } else {
             $state.tokens.push_none();
         }
     } };
-    ( ($Node:ident?) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        if $lexer.peek_matches($matches) {
+    ( ($Node:ident?) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+        if $state.token_stream.matches($matches) {
             $state.nodes.push_some();
-            tiny_parse_push_parser!($Node $state $expect);
+            $state.push_parser::<$Node<Tiny>>($expect);
         } else {
             $state.nodes.push_none();
         }
     };
-    ( ($Node:ident[?]) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        if $lexer.peek_matches($matches) {
+    ( ($Node:ident[?]) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+        if $state.token_stream.matches($matches) {
             $state.nodes.push_some();
-            tiny_parse_push_parser!($Node $state $expect);
+            $state.push_parser::<$Node<Tiny>>($expect);
         } else {
             $state.nodes.push_none();
         }
     };
-    ( [$Token:ident*] $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+    ( [$Token:ident*] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
         $state.tokens.start_repetition();
-        while $lexer.peek_matches($matches) {
-            $state.tokens.push($lexer.next_expected()?);
-            check_expected!($lexer $expect);
+        while $state.token_stream.matches($matches) {
+            $state.tokens.push($state.token_stream.next($expect)?);
         }
     } };
-    ( ($Node:ident*) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node_repetition_iterative!($Node $lexer $state $original_expect $field $repetition $matches $expect)
+    ( ($Node:ident*) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_node_repetition_iterative!($Node $state $original_expect $field $repetition $matches $expect)
     };
-    ( ($Node:ident[*]) $lexer:ident $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node_repetition_iterative!($Node $lexer $state $original_expect $field $repetition $matches $expect)
-    };
-}
-
-macro_rules! expect_field_by_nested_token_set {
-    ( $nested_token_set:ident $expect:ident ) => {
-        if $nested_token_set.exhaustive {
-            Expect {
-                tokens: $nested_token_set.tokens,
-                or_end_of_input: false,
-            }
-        } else {
-            Expect {
-                tokens: $nested_token_set
-                    .tokens
-                    .xor_without_ambiguity($expect.tokens),
-                or_end_of_input: $expect.or_end_of_input,
-            }
-        }
+    ( ($Node:ident[*]) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
+        tiny_parse_node_repetition_iterative!($Node $state $original_expect $field $repetition $matches $expect)
     };
 }
 
@@ -595,7 +533,7 @@ macro_rules! expect_next_field {
         paste! {
             if let Some(next_field) = [<$Name:snake>]::Field::[<$field:camel>].next() {
                 let next_expected_tokens = Self::EXPECTED_TOKENS_FROM[next_field];
-                expect_field_by_nested_token_set!(next_expected_tokens $expect)
+                next_expected_tokens.expect($expect)
             } else {
                 $expect
             }
@@ -606,7 +544,7 @@ macro_rules! expect_next_field {
 macro_rules! expect_same_field {
     ( $Name:ident $field:ident $expect:ident ) => { paste! { {
         let same_expected_tokens = Self::EXPECTED_TOKENS_FROM[[<$Name:snake>]::Field::[<$field:camel>]];
-        expect_field_by_nested_token_set!(same_expected_tokens $expect)
+        same_expected_tokens.expect($expect)
     } } };
 }
 
@@ -812,14 +750,6 @@ macro_rules! impl_struct_parse {
                 repeat_until_empty!(array $( $Field )* ).0
             });
 
-            /// Shorthand for the first entry in `EXPECTED_TOKENS_FROM`.
-            ///
-            /// Implemented in a way that does not introduce cycle compiler errors.
-            const EXPECTED_TOKENS: NestedTokenSet = {
-                let tokens = NestedTokenSet::new();
-                until_required!(tokens $( $Field )* )
-            };
-
             const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = {
                 let mut nodes = NodeSet::new();
                 $( if_node!($Field {
@@ -842,28 +772,24 @@ macro_rules! impl_struct_parse {
         const _: () = { $( ensure_no_recursive_node_repetition!($Name $Field $field); )* };
 
         impl TinyParseImpl for $Name<Tiny> {
-            fn tiny_prepare_lexer(lexer: &mut TinyLexer) -> Result<Expect, FatalLexerError> {
-                check_expected!(lexer (Expect {
-                    tokens: Self::EXPECTED_TOKENS.tokens,
-                    or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
-                }));
-                Ok(Expect {
-                    tokens: TokenSet::new(),
-                    or_end_of_input: true,
-                })
-            }
+            /// Shorthand for the first entry in `EXPECTED_TOKENS_FROM`.
+            ///
+            /// Implemented in a way that does not introduce cycle compiler errors.
+            const EXPECTED_TOKENS: NestedTokenSet = {
+                let tokens = NestedTokenSet::new();
+                until_required!(tokens $( $Field )* )
+            };
 
-            fn tiny_parse_nested(lexer: &mut TinyLexer, expect: Expect) -> Result<Self, FatalLexerError> {
+            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Result<Self, FatalLexerError> {
                 Ok(Self { $( $field: {
-                    tiny_parse_by_mode!($Field lexer match {
+                    tiny_parse_by_mode!($Field token_stream match {
                         Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
                     } { expect_field!($Field $Name $field expect) })
                 }, )* })
             }
 
             fn tiny_parse_iterative(
-                lexer: &mut TinyLexer,
-                state: &mut TinyParseState,
+                state: &mut TinyParseState<impl TinyTokenStream>,
                 expect: Expect,
                 field: usize,
                 repetition: bool,
@@ -877,15 +803,10 @@ macro_rules! impl_struct_parse {
                     return Ok(());
                 }
                 if !repetition {
-                    state.parsers.push(TinyParseFn {
-                        parse: Self::tiny_parse_iterative,
-                        expect,
-                        field: field + 1,
-                        repetition: false,
-                    });
+                    state.push_next_field::<Self>(expect, field);
                 }
                 match [<$Name:snake>]::Field::from_usize(field) { $( [<$Name:snake>]::Field::[<$field:camel>] => {
-                    tiny_parse_by_mode_iterative!($Field lexer state expect field repetition match {
+                    tiny_parse_by_mode_iterative!($Field state expect field repetition match {
                         Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
                     } { expect_field!($Field $Name $field expect) });
                 } )* }
