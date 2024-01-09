@@ -279,30 +279,30 @@ macro_rules! tiny_parse_push_parser {
 
 macro_rules! impl_enum_parse {
     ( $Name:ident {
-        $( Tokens: [ $( $Token:ident, )* ] )?
-        $( Nodes: [ $( $Node:ident, )* ] )?
+        $( [$Token:ident], )*
+        $( ($Node:ident), )*
     } ) => { paste! {
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub(crate) enum $Name<S: Style> {
-            $( $( $Token(Token<token::$Token, S>), )* )?
-            $( $( $Node($Node<S>), )* )?
+            $( $Token(Token<token::$Token, S>), )*
+            $( $Node($Node<S>), )*
         }
 
         impl<S: Style> $Name<S> {
             const EXPECTED_TOKENS: NestedTokenSet = {
                 NestedTokenSet::new()
-                    $( $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )* )?
-                    $( $( .xor_without_ambiguity_const($Node::<S>::EXPECTED_TOKENS) )* )?
+                    $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )*
+                    $( .xor_without_ambiguity_const($Node::<S>::EXPECTED_TOKENS) )*
             };
 
             const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = NodeSet {
-                $( $( [<$Node:snake>]: true, )* )?
+                $( [<$Node:snake>]: true, )*
                 ..NodeSet::new()
             };
 
             fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
                 match self {
-                    $( $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )* )?
+                    $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )*
                     _ => {}
                 }
             }
@@ -325,13 +325,13 @@ macro_rules! impl_enum_parse {
             fn tiny_parse_nested(lexer: &mut TinyLexer, expect: Expect) -> Result<Self, FatalLexerError> {
                 let found = lexer.peek_expected();
 
-                $( $( if found == TokenKind::$Token {
+                $( if found == TokenKind::$Token {
                     return Ok(Self::$Token(tiny_parse_token!($Token lexer expect)));
-                } )* )?
+                } )*
 
-                $( $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
+                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
                     return Ok(Self::$Node(tiny_parse_node!($Node lexer expect)));
-                } )* )?
+                } )*
 
                 unreachable!("token should match one of the above cases");
             }
@@ -345,7 +345,7 @@ macro_rules! impl_enum_parse {
             ) -> Result<(), FatalLexerError> {
                 if field == 1 {
                     let node = match state.nodes.pop_kind() {
-                        $( $( NodeKind::$Node => Self::$Node(NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>])), )* )?
+                        $( NodeKind::$Node => Self::$Node(NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>])), )*
                         _ => unreachable!("node should match one of the above cases"),
                     };
                     state.nodes.[<$Name:snake>].push(node);
@@ -354,10 +354,10 @@ macro_rules! impl_enum_parse {
 
                 let found = lexer.peek_expected();
 
-                $( $( if found == TokenKind::$Token {
+                $( if found == TokenKind::$Token {
                     state.nodes.[<$Name:snake>].push(Self::$Token(tiny_parse_token!($Token lexer expect)));
                     return Ok(());
-                } )* )?
+                } )*
 
                 state.parsers.push(TinyParseFn {
                     parse: Self::tiny_parse_iterative,
@@ -366,11 +366,11 @@ macro_rules! impl_enum_parse {
                     repetition: false,
                 });
 
-                $( $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
+                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
                     state.nodes.push_kind(NodeKind::$Node);
                     tiny_parse_push_parser!($Node state expect);
                     return Ok(());
-                } )* )?
+                } )*
 
                 unreachable!("token should match one of the above cases");
             }
@@ -1078,52 +1078,46 @@ macro_rules! impl_node_parse {
 impl_node_parse! {
 
 enum UnaryOperator {
-    Tokens: [
-        Not,
-        Minus,
-    ]
+    [Not],
+    [Minus],
 }
 
 enum BinaryOperator {
-    Tokens: [
-        Plus,
-        // Minus,
-        // Star,
-        // Slash,
-        // Percent,
-        // Caret,
-        // And,
-        // Or,
-        // AndAnd,
-        // OrOr,
-        // Shl,
-        // Shr,
-        // PlusEq,
-        // MinusEq,
-        // StarEq,
-        // SlashEq,
-        // PercentEq,
-        // CaretEq,
-        // AndEq,
-        // OrEq,
-        // ShlEq,
-        // ShrEq,
-        // EqEq,
-        // Ne,
-        // Gt,
-        // Lt,
-        // Ge,
-        // Le,
-    ]
+    [Plus],
+    [Minus],
+    [Star],
+    [Slash],
+    [Percent],
+    [Caret],
+    [And],
+    [Or],
+    [AndAnd],
+    [OrOr],
+    [Shl],
+    [Shr],
+    [PlusEq],
+    [MinusEq],
+    [StarEq],
+    [SlashEq],
+    [PercentEq],
+    [CaretEq],
+    [AndEq],
+    [OrEq],
+    [ShlEq],
+    [ShrEq],
+    [EqEq],
+    [Ne],
+    [Gt],
+    [Lt],
+    [Ge],
+    [Le],
 }
 
 enum Literal {
-    Tokens: [
-        Integer,
-        Float,
-        // String,
-        // Char,
-    ]
+    [Integer],
+    [Float],
+    [String],
+    [Char],
 }
 
 struct SelfRepetition {
@@ -1143,13 +1137,9 @@ struct StructNode {
 }
 
 enum EnumNode {
-    Tokens: [
-        Struct,
-        Mod,
-    ]
-    Nodes: [
-        StructNode,
-    ]
+    [Struct],
+    [Mod],
+    (StructNode),
 }
 
 struct Test {
