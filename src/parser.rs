@@ -199,7 +199,7 @@ impl TinyTokenStack {
 
     /// Intentionally consumes self, signifying that this is the last operation.
     fn is_empty(self) -> bool {
-        self.dynamic.is_empty() // && self.optional.is_empty() && self.repetition.is_empty()
+        self.dynamic.is_empty() && self.optional.is_empty() && self.repetition.is_empty()
     }
 
     fn push(&mut self, token: SmolStr) {
