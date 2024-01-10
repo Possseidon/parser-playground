@@ -134,12 +134,10 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// Parses recursively.
     ///
     /// This is very fast, but might lead to a stack overflow for deeply nested code. To avoid
-    /// crashes for e.g. untrusted input, use [`TinyParse::tiny_parse_safe()`] or better yet
-    /// [`TinyParse::tiny_parse_with_depth()`] to also limit execution time.
+    /// crashes for e.g. untrusted input, use [`TinyParse::tiny_parse_safe()`].
     ///
-    /// One could add a `max_recursion` limit here, similar to `max_depth` in
-    /// [`TinyParse::tiny_parse_with_depth()`], but that can't really provide any guarantees, since
-    /// the stack might already be almost full despite a low limit.
+    /// One could add a `max_recursion` limit here, but that can't really provide any guarantees,
+    /// since the stack might already be almost full despite a low limit.
     ///
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
@@ -149,29 +147,21 @@ pub(crate) trait TinyParse: TinyParseImpl {
         Self::tiny_parse_nested(&mut token_stream, Expect::END_OF_INPUT)
     }
 
-    /// Parses iteratively to avoid stack overflow.
+    /// Parses iteratively rather than recursively to avoid stack overflow.
     ///
-    /// While this is safe from crashes, it can still take a very long time for large inputs.
-    /// To avoid even that, use [`TinyParse::tiny_parse_with_depth()`] and limit the depth to a
-    /// reasonable value.
+    /// Keep in mind, that you might also want to limit the size of the input to some maximum to
+    /// also effectively limit its execution time, so that it doesn't hang up the program.
     ///
-    /// Simply calls [`TinyParse::tiny_parse_with_depth()`] with a maximum depth of [`usize::MAX`].
+    /// Furthermore, since tokens can be arbitrarily large, limit the actual input, not just the
+    /// number of tokens.
     fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> Result<Self, FatalLexerError> {
-        Self::tiny_parse_with_depth(token_stream, usize::MAX)
-    }
-
-    /// Parses iteratively with a maximum depth to avoid long execution times.
-    fn tiny_parse_with_depth(
-        token_stream: impl TinyTokenStream,
-        max_depth: usize,
-    ) -> Result<Self, FatalLexerError> {
         let mut state = TinyParseState::new(CheckedTinyTokenStream::new(
             token_stream,
             Self::INITIAL_EXPECT,
         )?);
         Self::tiny_parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
-        while let Some(parse_fn) = state.parsers.pop() {
-            parse_fn.parse(&mut state)?;
+        while let Some(parser) = state.parsers.pop() {
+            parser.parse(&mut state)?;
         }
         assert!(state.tokens.is_empty(), "leftover tokens after parsing");
         let result = Self::pop_final_node(&mut state.nodes);
