@@ -17,9 +17,6 @@ type TinyLexerTokenResult = Result<TinyLexerToken, FatalLexerError>;
 pub(crate) trait TinyTokenStream: Iterator<Item = TinyLexerTokenResult> {}
 impl<T: Iterator<Item = TinyLexerTokenResult>> TinyTokenStream for T {}
 
-pub(crate) trait IntoTinyTokenStream: IntoIterator<Item = TinyLexerTokenResult> {}
-impl<T: IntoIterator<Item = TinyLexerTokenResult>> IntoTinyTokenStream for T {}
-
 /// A [`TinyTokenStream`] that also makes sure the next token matches what is [`Expect`]ed.
 #[derive(Debug)]
 pub(crate) struct CheckedTinyTokenStream<T: TinyTokenStream> {
@@ -65,9 +62,6 @@ impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
         }
     }
 }
-
-// pub(crate) trait Parsable: Read {}
-// impl<T: Read> Parsable for T {}
 
 #[derive(Debug)]
 pub(crate) struct TinyLexer<'code> {

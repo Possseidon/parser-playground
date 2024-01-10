@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::{
-    lexer::{CheckedTinyTokenStream, FatalLexerError, IntoTinyTokenStream, TinyTokenStream},
+    lexer::{CheckedTinyTokenStream, FatalLexerError, TinyTokenStream},
     push_array::PushArray,
     token::{token, Expect, NestedTokenSet, Style, Tiny, TinyToken, Token, TokenKind, TokenSet},
 };
@@ -144,9 +144,8 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
     /// this again in the future, but for now I'll keep it as is.
-    fn tiny_parse_fast(token_stream: impl IntoTinyTokenStream) -> Result<Self, FatalLexerError> {
-        let mut token_stream =
-            CheckedTinyTokenStream::new(token_stream.into_iter(), Self::INITIAL_EXPECT)?;
+    fn tiny_parse_fast(token_stream: impl TinyTokenStream) -> Result<Self, FatalLexerError> {
+        let mut token_stream = CheckedTinyTokenStream::new(token_stream, Self::INITIAL_EXPECT)?;
         Self::tiny_parse_nested(&mut token_stream, Expect::END_OF_INPUT)
     }
 
@@ -157,17 +156,17 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// reasonable value.
     ///
     /// Simply calls [`TinyParse::tiny_parse_with_depth()`] with a maximum depth of [`usize::MAX`].
-    fn tiny_parse_safe(token_stream: impl IntoTinyTokenStream) -> Result<Self, FatalLexerError> {
+    fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> Result<Self, FatalLexerError> {
         Self::tiny_parse_with_depth(token_stream, usize::MAX)
     }
 
     /// Parses iteratively with a maximum depth to avoid long execution times.
     fn tiny_parse_with_depth(
-        token_stream: impl IntoTinyTokenStream,
+        token_stream: impl TinyTokenStream,
         max_depth: usize,
     ) -> Result<Self, FatalLexerError> {
         let mut state = TinyParseState::new(CheckedTinyTokenStream::new(
-            token_stream.into_iter(),
+            token_stream,
             Self::INITIAL_EXPECT,
         )?);
         Self::tiny_parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
