@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::{
-    lexer::{CheckedTinyTokenStream, FatalLexerError, TinyTokenStream},
+    lexer::{CheckedTinyTokenStream, TinyTokenStream},
     push_array::PushArray,
     token::{token, Expect, NestedTokenSet, Style, Tiny, TinyToken, Token, TokenKind, TokenSet},
 };
@@ -35,14 +35,14 @@ struct TinyParseFn<T: TinyTokenStream> {
         expect: Expect,
         field: usize,
         repetition: bool,
-    ) -> Result<(), FatalLexerError>,
+    ) -> Option<()>,
     expect: Expect,
     field: usize,
     repetition: bool,
 }
 
 impl<T: TinyTokenStream> TinyParseFn<T> {
-    fn parse(self, state: &mut TinyParseState<T>) -> Result<(), FatalLexerError> {
+    fn parse(self, state: &mut TinyParseState<T>) -> Option<()> {
         (self.parse)(state, self.expect, self.field, self.repetition)
     }
 }
@@ -115,7 +115,7 @@ trait TinyParseImpl: Sized {
     fn tiny_parse_nested(
         token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>,
         expect: Expect,
-    ) -> Result<Self, FatalLexerError>;
+    ) -> Option<Self>;
 
     /// Used by [`TinyParse::tiny_parse_safe()`] and [`TinyParse::tiny_parse_with_depth()`].
     fn tiny_parse_iterative(
@@ -123,7 +123,7 @@ trait TinyParseImpl: Sized {
         expect: Expect,
         field: usize,
         repetition: bool,
-    ) -> Result<(), FatalLexerError>;
+    ) -> Option<()>;
 
     /// Used at the very end to last node from the node stack.
     fn pop_final_node(nodes: &mut NodeStack<Tiny>) -> Self;
@@ -142,7 +142,7 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
     /// this again in the future, but for now I'll keep it as is.
-    fn tiny_parse_fast(token_stream: impl TinyTokenStream) -> Result<Self, FatalLexerError> {
+    fn tiny_parse_fast(token_stream: impl TinyTokenStream) -> Option<Self> {
         let mut token_stream = CheckedTinyTokenStream::new(token_stream, Self::INITIAL_EXPECT)?;
         Self::tiny_parse_nested(&mut token_stream, Expect::END_OF_INPUT)
     }
@@ -154,7 +154,7 @@ pub(crate) trait TinyParse: TinyParseImpl {
     ///
     /// Furthermore, since tokens can be arbitrarily large, limit the actual input, not just the
     /// number of tokens.
-    fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> Result<Self, FatalLexerError> {
+    fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> Option<Self> {
         let mut state = TinyParseState::new(CheckedTinyTokenStream::new(
             token_stream,
             Self::INITIAL_EXPECT,
@@ -166,7 +166,7 @@ pub(crate) trait TinyParse: TinyParseImpl {
         assert!(state.tokens.is_empty(), "leftover tokens after parsing");
         let result = Self::pop_final_node(&mut state.nodes);
         assert!(state.nodes.is_empty(), "leftover nodes after parsing");
-        Ok(result)
+        Some(result)
     }
 }
 
@@ -296,15 +296,15 @@ macro_rules! impl_enum_parse {
                     $( .xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS) )*
             };
 
-            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Result<Self, FatalLexerError> {
+            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<Self> {
                 let found = token_stream.kind();
 
                 $( if found == TokenKind::$Token {
-                    return Ok(Self::$Token(Token::<token::$Token, Tiny>::new(token_stream.next(expect)?)));
+                    return Some(Self::$Token(Token::<token::$Token, Tiny>::new(token_stream.next(expect)?)));
                 } )*
 
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    return Ok(Self::$Node($Node::<Tiny>::tiny_parse_nested(token_stream, expect)?));
+                    return Some(Self::$Node($Node::<Tiny>::tiny_parse_nested(token_stream, expect)?));
                 } )*
 
                 unreachable!("token should match one of the above cases");
@@ -315,21 +315,21 @@ macro_rules! impl_enum_parse {
                 expect: Expect,
                 field: usize,
                 _repetition: bool,
-            ) -> Result<(), FatalLexerError> {
+            ) -> Option<()> {
                 if field == 1 {
                     let node = match state.nodes.pop_kind() {
                         $( NodeKind::$Node => Self::$Node(NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>])), )*
                         _ => unreachable!("node should match one of the above cases"),
                     };
                     state.nodes.[<$Name:snake>].push(node);
-                    return Ok(());
+                    return Some(());
                 }
 
                 let found = state.token_stream.kind();
 
                 $( if found == TokenKind::$Token {
                     state.nodes.[<$Name:snake>].push(Self::$Token(Token::<token::$Token, Tiny>::new(state.token_stream.next(expect)?)));
-                    return Ok(());
+                    return Some(());
                 } )*
 
                 state.push_build_enum::<Self>(expect);
@@ -337,7 +337,7 @@ macro_rules! impl_enum_parse {
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
                     state.nodes.push_kind(NodeKind::$Node);
                     state.push_parser::<$Node<Tiny>>(expect);
-                    return Ok(());
+                    return Some(());
                 } )*
 
                 unreachable!("token should match one of the above cases");
@@ -769,8 +769,8 @@ macro_rules! impl_struct_parse {
                 until_required!(tokens $( $Field )* )
             };
 
-            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Result<Self, FatalLexerError> {
-                Ok(Self { $( $field: {
+            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<Self> {
+                Some(Self { $( $field: {
                     tiny_parse_by_mode!($Field token_stream match {
                         Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
                     } { expect_field!($Field $Name $field expect) })
@@ -782,14 +782,14 @@ macro_rules! impl_struct_parse {
                 expect: Expect,
                 field: usize,
                 repetition: bool,
-            ) -> Result<(), FatalLexerError> {
+            ) -> Option<()> {
                 if field == [<$Name:snake>]::Field::LENGTH {
                     $( let $field; )*
                     reverse!( $( {
                         $field = tiny_parse_build_field!($Field state)
                     } )* );
                     state.nodes.[<$Name:snake>].push(Self { $( $field, )* });
-                    return Ok(());
+                    return Some(());
                 }
                 if !repetition {
                     state.push_next_field::<Self>(expect, field);
@@ -799,7 +799,7 @@ macro_rules! impl_struct_parse {
                         Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
                     } { expect_field!($Field $Name $field expect) });
                 } )* }
-                Ok(())
+                Some(())
             }
 
             impl_pop_final_node!($Name);

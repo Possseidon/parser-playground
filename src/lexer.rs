@@ -12,10 +12,8 @@ pub(crate) struct TinyLexerToken {
     pub(crate) text: SmolStr,
 }
 
-type TinyLexerTokenResult = Result<TinyLexerToken, FatalLexerError>;
-
-pub(crate) trait TinyTokenStream: Iterator<Item = TinyLexerTokenResult> {}
-impl<T: Iterator<Item = TinyLexerTokenResult>> TinyTokenStream for T {}
+pub(crate) trait TinyTokenStream: Iterator<Item = Option<TinyLexerToken>> {}
+impl<T: Iterator<Item = Option<TinyLexerToken>>> TinyTokenStream for T {}
 
 /// A [`TinyTokenStream`] that also makes sure the next token matches what is [`Expect`]ed.
 #[derive(Debug)]
@@ -26,14 +24,14 @@ pub(crate) struct CheckedTinyTokenStream<T: TinyTokenStream> {
 }
 
 impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
-    pub(crate) fn new(token_stream: T, expect: Expect) -> Result<Self, FatalLexerError> {
+    pub(crate) fn new(token_stream: T, expect: Expect) -> Option<Self> {
         let mut result = Self {
             token_stream,
             current_kind: None,
             next_token: SmolStr::new_inline(""),
         };
         result.next(expect)?; // replace empty current token with actual first token
-        Ok(result)
+        Some(result)
     }
 
     pub(crate) fn kind(&self) -> TokenKind {
@@ -45,20 +43,20 @@ impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
     }
 
     /// Yields a token from the stream while also making sure the token afterwards matches `expect`.
-    pub(crate) fn next(&mut self, expect: Expect) -> Result<SmolStr, FatalLexerError> {
+    pub(crate) fn next(&mut self, expect: Expect) -> Option<SmolStr> {
         if let Some(next_token) = self.token_stream.next() {
             let next_token = next_token?;
             if expect.tokens.contains(next_token.kind) {
                 self.current_kind = Some(next_token.kind);
-                Ok(replace(&mut self.next_token, next_token.text))
+                Some(replace(&mut self.next_token, next_token.text))
             } else {
-                Err(FatalLexerError)
+                None
             }
         } else if expect.or_end_of_input {
             self.current_kind = None;
-            Ok(take(&mut self.next_token))
+            Some(take(&mut self.next_token))
         } else {
-            Err(FatalLexerError)
+            None
         }
     }
 }
@@ -74,12 +72,8 @@ impl<'code> TinyLexer<'code> {
         Self { code, pos: 0 }
     }
 
-    /// After and error is yielded, all consecutive calls will also yield an error.
-    fn next_transposed(&mut self) -> Result<Option<TinyLexerToken>, FatalLexerError> {
-        if self.eof_after_whitespace()? {
-            return Ok(None);
-        }
-
+    /// Yields the next token, assuming [`Self::skip_whitespace()`] was called previously.
+    fn next_token(&mut self) -> Option<TinyLexerToken> {
         let rest = &self.code[self.pos..];
         let (kind, len, dynamic) = if let Some(after_doc_comment) = rest.strip_prefix("///") {
             (
@@ -152,19 +146,19 @@ impl<'code> TinyLexer<'code> {
             let quote_after_ident = after_ident_chars.starts_with('\'');
 
             if ident_chars < 1 || quote_after_ident {
-                let end = lex_quoted(after_ident_chars, '\'', FatalLexerError)?;
+                let end = lex_quoted(after_ident_chars, '\'')?;
                 (TokenKind::Char, rest.len() - end.len(), true)
             } else {
                 (TokenKind::Label, rest.len() - after_ident_chars.len(), true)
             }
         } else if let Some(after_quote) = rest.strip_prefix("b'") {
-            let end = lex_quoted(after_quote, '\'', FatalLexerError)?;
+            let end = lex_quoted(after_quote, '\'')?;
             (TokenKind::Char, rest.len() - end.len(), true)
         } else if let Some(after_quote) = rest.strip_prefix('"') {
-            let end = lex_quoted(after_quote, '\"', FatalLexerError)?;
+            let end = lex_quoted(after_quote, '\"')?;
             (TokenKind::String, rest.len() - end.len(), true)
         } else if let Some(after_quote) = rest.strip_prefix("b\"") {
-            let end = lex_quoted(after_quote, '\"', FatalLexerError)?;
+            let end = lex_quoted(after_quote, '\"')?;
             (TokenKind::String, rest.len() - end.len(), true)
         } else if rest.starts_with("r#") || rest.starts_with("r\"") {
             let end = lex_raw_string(&rest[1..])?;
@@ -184,25 +178,26 @@ impl<'code> TinyLexer<'code> {
         } else if let Some((symbol, len)) = TokenKind::parse_symbol(rest.as_bytes()) {
             (symbol, len, false)
         } else {
-            let kind = TokenKind::parse_char(rest.as_bytes()[0]).ok_or(FatalLexerError)?;
+            let kind = TokenKind::parse_char(rest.as_bytes()[0])?;
             (kind, 1, false)
         };
 
         self.pos += len;
-        Ok(Some(TinyLexerToken {
+        Some(TinyLexerToken {
             kind,
             text: if dynamic {
                 rest[..len].into()
             } else {
                 SmolStr::new_inline("")
             },
-        }))
+        })
     }
 
-    fn eof_after_whitespace(&mut self) -> Result<bool, FatalLexerError> {
+    /// Skips over whitespace, and returns `None` if EOF was reached.
+    fn skip_whitespace(&mut self) -> Option<Option<()>> {
         loop {
             match self.code[self.pos..].bytes().next() {
-                None => break Ok(true),
+                None => break None,
                 Some(c) if c.is_ascii_whitespace() => {
                     self.pos = self.code[self.pos + 1..]
                         .find(|c: char| !c.is_ascii_whitespace())
@@ -210,7 +205,7 @@ impl<'code> TinyLexer<'code> {
                 }
                 Some(b'/') => {
                     if self.code[self.pos + 1..].starts_with("//") {
-                        break Ok(false);
+                        break Some(Some(()));
                     } else if self.code[self.pos + 1..].starts_with('/') {
                         self.pos = 2 + find_line_break(&self.code[self.pos + 2..]);
                     } else if self.code[self.pos + 1..].starts_with('*') {
@@ -218,7 +213,9 @@ impl<'code> TinyLexer<'code> {
                         let mut after_block_comment = &self.code[self.pos + 2..];
                         let mut nesting: usize = 0;
                         loop {
-                            let len = after_block_comment.find("*/").ok_or(FatalLexerError)?;
+                            let Some(len) = after_block_comment.find("*/") else {
+                                return Some(None);
+                            };
                             if let Some(open) = after_block_comment[..len].find("/*") {
                                 after_block_comment = &after_block_comment[open + 2..];
                                 nesting += 1;
@@ -232,10 +229,10 @@ impl<'code> TinyLexer<'code> {
                             }
                         }
                     } else {
-                        break Ok(false);
+                        break Some(Some(()));
                     }
                 }
-                _ => break Ok(false),
+                _ => break Some(Some(())),
             }
         }
     }
@@ -254,23 +251,23 @@ fn find_line_break(text: &str) -> usize {
     }
 }
 
-fn lex_quoted<E>(mut after_quote: &str, quote: char, unterminated_error: E) -> Result<&str, E> {
+fn lex_quoted(mut after_quote: &str, quote: char) -> Option<&str> {
     loop {
         after_quote = after_quote.trim_start_matches(|c: char| c != quote && c != '\\');
         if let Some(end) = after_quote.strip_prefix(quote) {
-            break Ok(end);
+            break Some(end);
         }
         after_quote = match after_quote
             .trim_start_matches(|c: char| c != '\\')
             .strip_prefix(|_| true)
         {
             Some(after_escape) => after_escape,
-            None => return Err(unterminated_error),
+            None => return None,
         };
     }
 }
 
-fn lex_raw_string(after_r: &str) -> Result<&str, FatalLexerError> {
+fn lex_raw_string(after_r: &str) -> Option<&str> {
     let after_pound = after_r.trim_matches('#');
     let start_pounds = &after_r[0..(after_r.len() - after_pound.len())];
     let mut after_quote = after_pound.strip_prefix('"').unwrap_or(after_pound);
@@ -278,29 +275,20 @@ fn lex_raw_string(after_r: &str) -> Result<&str, FatalLexerError> {
         after_quote = after_quote.trim_start_matches(|c: char| c != '"');
         if let Some(end_pounds) = after_quote.strip_prefix('"') {
             if let Some(end) = end_pounds.strip_prefix(start_pounds) {
-                break Ok(end);
+                break Some(end);
             }
             after_quote = end_pounds;
         } else {
-            break Err(FatalLexerError);
+            break None;
         }
     }
 }
 
-/// Some error occured during tiny lexing.
-///
-/// Always fatal; afterwards the iterator will be empty and yield `None`.
-///
-/// [`TinyLexer`] cannot simply return [`None`] in case of error, since it needs to be
-/// distinguishable from a plain end of input.
-#[derive(Debug)]
-pub(crate) struct FatalLexerError;
-
 impl Iterator for TinyLexer<'_> {
-    type Item = TinyLexerTokenResult;
+    type Item = Option<TinyLexerToken>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_transposed().transpose()
+        Some(self.skip_whitespace()?.and_then(|_| self.next_token()))
     }
 }
 
