@@ -1,408 +1,22 @@
+pub(crate) mod positioned;
+pub(crate) mod tiny;
+
 use std::fmt;
 
 use bitvec::vec::BitVec;
 use enum_map::{Enum, EnumMap};
 use paste::paste;
 use smallvec::SmallVec;
-use smol_str::SmolStr;
 
 use crate::{
     lexer::{CheckedTinyTokenStream, TinyTokenStream},
     push_array::PushArray,
-    token::{token, Expect, NestedTokenSet, Style, Tiny, TinyToken, Token, TokenKind, TokenSet},
+    token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenSet, TokenStorage},
 };
 
-enum ParseErrorKind {
-    TokensExpectedFoundEndOfInput {
-        expected: TokenSet,
-    },
-    TokensExpectedFoundToken {
-        expected: TokenSet,
-        found: TokenKind,
-    },
-}
+use self::tiny::{TinyParseImpl, TinyParseState};
 
-struct ParseError {
-    kind: ParseErrorKind,
-    pos: usize,
-    len: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TinyParseFn<T: TinyTokenStream> {
-    parse: fn(
-        state: &mut TinyParseState<T>,
-        expect: Expect,
-        field: usize,
-        repetition: bool,
-    ) -> Option<()>,
-    expect: Expect,
-    field: usize,
-    repetition: bool,
-}
-
-impl<T: TinyTokenStream> TinyParseFn<T> {
-    fn parse(self, state: &mut TinyParseState<T>) -> Option<()> {
-        (self.parse)(state, self.expect, self.field, self.repetition)
-    }
-}
-
-#[derive(Debug)]
-struct TinyParseState<T: TinyTokenStream> {
-    token_stream: CheckedTinyTokenStream<T>,
-    parsers: Vec<TinyParseFn<T>>,
-    tokens: TinyTokenStack,
-    nodes: NodeStack<Tiny>,
-}
-
-impl<T: TinyTokenStream> TinyParseState<T> {
-    fn new(token_stream: CheckedTinyTokenStream<T>) -> Self {
-        Self {
-            token_stream,
-            parsers: Vec::new(),
-            tokens: TinyTokenStack::new(),
-            nodes: NodeStack::new(),
-        }
-    }
-
-    fn push_parser<N: TinyParseImpl>(&mut self, expect: Expect) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field: 0,
-            repetition: false,
-        })
-    }
-
-    fn push_build_enum<N: TinyParseImpl>(&mut self, expect: Expect) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field: 1,
-            repetition: false,
-        });
-    }
-
-    fn push_next_field<N: TinyParseImpl>(&mut self, expect: Expect, field: usize) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field: field + 1,
-            repetition: false,
-        });
-    }
-
-    fn push_repetition<N: TinyParseImpl>(&mut self, expect: Expect, field: usize) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field,
-            repetition: true,
-        });
-    }
-}
-
-trait TinyParseImpl: Sized {
-    /// Which tokens are initially expected.
-    const EXPECTED_TOKENS: NestedTokenSet;
-
-    const INITIAL_EXPECT: Expect = Expect {
-        tokens: Self::EXPECTED_TOKENS.tokens,
-        or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
-    };
-
-    /// Used by [`TinyParse::tiny_parse_fast()`].
-    fn tiny_parse_nested(
-        token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>,
-        expect: Expect,
-    ) -> Option<Self>;
-
-    /// Used by [`TinyParse::tiny_parse_safe()`] and [`TinyParse::tiny_parse_with_depth()`].
-    fn tiny_parse_iterative(
-        state: &mut TinyParseState<impl TinyTokenStream>,
-        expect: Expect,
-        field: usize,
-        repetition: bool,
-    ) -> Option<()>;
-
-    /// Used at the very end to last node from the node stack.
-    fn pop_final_node(nodes: &mut NodeStack<Tiny>) -> Self;
-}
-
-#[allow(private_bounds)]
-pub(crate) trait TinyParse: TinyParseImpl {
-    /// Parses recursively.
-    ///
-    /// This is very fast, but might lead to a stack overflow for deeply nested code. To avoid
-    /// crashes for e.g. untrusted input, use [`TinyParse::tiny_parse_safe()`].
-    ///
-    /// One could add a `max_recursion` limit here, but that can't really provide any guarantees,
-    /// since the stack might already be almost full despite a low limit.
-    ///
-    /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
-    /// check to slow down parsing (even though it probably wouldn't be much). I might look into
-    /// this again in the future, but for now I'll keep it as is.
-    fn tiny_parse_fast(token_stream: impl TinyTokenStream) -> Option<Self> {
-        let mut token_stream = CheckedTinyTokenStream::new(token_stream, Self::INITIAL_EXPECT)?;
-        Self::tiny_parse_nested(&mut token_stream, Expect::END_OF_INPUT)
-    }
-
-    /// Parses iteratively rather than recursively to avoid stack overflow.
-    ///
-    /// Keep in mind, that you might also want to limit the size of the input to some maximum to
-    /// also effectively limit its execution time, so that it doesn't hang up the program.
-    ///
-    /// Furthermore, since tokens can be arbitrarily large, limit the actual input, not just the
-    /// number of tokens.
-    fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> Option<Self> {
-        let mut state = TinyParseState::new(CheckedTinyTokenStream::new(
-            token_stream,
-            Self::INITIAL_EXPECT,
-        )?);
-        Self::tiny_parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
-        while let Some(parser) = state.parsers.pop() {
-            parser.parse(&mut state)?;
-        }
-        assert!(state.tokens.is_empty(), "leftover tokens after parsing");
-        let result = Self::pop_final_node(&mut state.nodes);
-        assert!(state.nodes.is_empty(), "leftover nodes after parsing");
-        Some(result)
-    }
-}
-
-impl<T: TinyParseImpl> TinyParse for T {}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TinyTokenStack {
-    /// For every `true`, there is also an entry in [`Self::tokens`].
-    ///
-    /// When using marked push/pop operations, [`Self::dynamic`]'s entries are omitted when marked.
-    dynamic: BitVec,
-    /// Excludes empty strings, which are instead indicated as `false` in [Self::dynamic].
-    tokens: Vec<SmolStr>,
-    /// Pushed for optional elements.
-    ///
-    /// If and only if `true` is pushed, there is also a matching entry in [`Self::dynamic`].
-    optional: BitVec,
-    /// Contains the start indices of a repetition in [`Self::dynamic`] and [`Self::tokens`].
-    repetition: SmallVec<[[usize; 2]; 1]>,
-}
-
-impl TinyTokenStack {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    /// Intentionally consumes self, signifying that this is the last operation.
-    fn is_empty(self) -> bool {
-        self.dynamic.is_empty() && self.optional.is_empty() && self.repetition.is_empty()
-    }
-
-    fn push(&mut self, token: SmolStr) {
-        if token.is_empty() {
-            self.dynamic.push(false);
-        } else {
-            self.dynamic.push(true);
-            self.tokens.push(token);
-        }
-    }
-
-    fn pop(&mut self) -> SmolStr {
-        if self
-            .dynamic
-            .pop()
-            .expect("dynamic stack should not be empty")
-        {
-            self.tokens.pop().expect("token stack should not be empty")
-        } else {
-            SmolStr::new_inline("")
-        }
-    }
-
-    fn push_some(&mut self, token: SmolStr) {
-        self.optional.push(true);
-        self.push(token);
-    }
-
-    /// Pushed either in place of a missing optional or at the start of a repetition.
-    fn push_none(&mut self) {
-        self.optional.push(false);
-    }
-
-    /// Pops a single optional token.
-    fn pop_optional(&mut self) -> Option<SmolStr> {
-        self.optional
-            .pop()
-            .expect("optional stack should not be empty")
-            .then(|| self.pop())
-    }
-
-    /// Marks the start of a new repetition. Elements must be pushed using [`Self::push()`].
-    fn start_repetition(&mut self) {
-        self.repetition
-            .push([self.dynamic.len(), self.tokens.len()]);
-    }
-
-    /// Pops an entire repetition, marked by an initial marker followed by marked tokens.
-    fn pop_repetition(&mut self) -> impl ExactSizeIterator<Item = SmolStr> + '_ {
-        let [dynamic_start, tokens_start] = self
-            .repetition
-            .pop()
-            .expect("repetition stack should not be empty");
-        let mut tokens = self.tokens.drain(tokens_start..);
-        self.dynamic.drain(dynamic_start..).map(move |dynamic| {
-            if dynamic {
-                tokens
-                    .next()
-                    .expect("tokens stack should contain more tokens")
-            } else {
-                SmolStr::new_inline("")
-            }
-        })
-    }
-}
-
-macro_rules! impl_enum_parse {
-    ( $Name:ident {
-        $( [$Token:ident], )*
-        $( ($Node:ident), )*
-    } ) => { paste! {
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub(crate) enum $Name<S: Style> {
-            $( $Token(Token<token::$Token, S>), )*
-            $( $Node($Node<S>), )*
-        }
-
-        impl<S: Style> $Name<S> {
-            const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = NodeSet {
-                $( [<$Node:snake>]: true, )*
-                ..NodeSet::new()
-            };
-
-            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
-                match self {
-                    $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )*
-                    _ => {}
-                }
-            }
-        }
-
-        const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
-
-        impl TinyParseImpl for $Name<Tiny> {
-            const EXPECTED_TOKENS: NestedTokenSet = {
-                NestedTokenSet::new()
-                    $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )*
-                    $( .xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS) )*
-            };
-
-            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<Self> {
-                let found = token_stream.kind();
-
-                $( if found == TokenKind::$Token {
-                    return Some(Self::$Token(Token::<token::$Token, Tiny>::new(token_stream.next(expect)?)));
-                } )*
-
-                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    return Some(Self::$Node($Node::<Tiny>::tiny_parse_nested(token_stream, expect)?));
-                } )*
-
-                unreachable!("token should match one of the above cases");
-            }
-
-            fn tiny_parse_iterative(
-                state: &mut TinyParseState<impl TinyTokenStream>,
-                expect: Expect,
-                field: usize,
-                _repetition: bool,
-            ) -> Option<()> {
-                if field == 1 {
-                    let node = match state.nodes.pop_kind() {
-                        $( NodeKind::$Node => Self::$Node(NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>])), )*
-                        _ => unreachable!("node should match one of the above cases"),
-                    };
-                    state.nodes.[<$Name:snake>].push(node);
-                    return Some(());
-                }
-
-                let found = state.token_stream.kind();
-
-                $( if found == TokenKind::$Token {
-                    state.nodes.[<$Name:snake>].push(Self::$Token(Token::<token::$Token, Tiny>::new(state.token_stream.next(expect)?)));
-                    return Some(());
-                } )*
-
-                state.push_build_enum::<Self>(expect);
-
-                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    state.nodes.push_kind(NodeKind::$Node);
-                    state.push_parser::<$Node<Tiny>>(expect);
-                    return Some(());
-                } )*
-
-                unreachable!("token should match one of the above cases");
-            }
-
-            impl_pop_final_node!($Name);
-        }
-    } };
-}
-
-macro_rules! field_type {
-    ( [$Token:ident] ) => { Token<token::$Token, S> };
-    ( [$Token:ident?] ) => { Option<Token<token::$Token, S>> };
-    // Could in theory optimized repetitions of fixed tokens, since those can be represented by
-    // a single usize, whereas SmallVec and Vec are always 24 bytes; but since a series of the same
-    // fixed token would make for a quite odd grammar, there is no need to overcomplicate this.
-    ( [$Token:ident*] ) => { SmallVec<[Token<token::$Token, S>; 1]> };
-    ( ($Node:ident) ) => { $Node<S> };
-    // While maybe useful, forbidding Box for unconditional nodes prevents unparsable grammars.
-    // However, I think, it is almost always better to box an optional node instead anyway.
-    // ( ($Node:ident[]) ) => { Box<$Node<S>> };
-    ( ($Node:ident?) ) => { Option<$Node<S>> };
-    ( ($Node:ident[?]) ) => { Option<Box<$Node<S>>> };
-    ( ($Node:ident*) ) => { SmallVec<[$Node<S>; 1]> };
-    ( ($Node:ident[*]) ) => { Vec<$Node<S>> };
-}
-
-macro_rules! token {
-    ( $tokens:ident $Token:ident ) => {
-        let $tokens =
-            $tokens.xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token));
-    };
-}
-
-macro_rules! node {
-    ( $tokens:ident $Node:ident ) => {
-        let $tokens = $tokens.xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS);
-    };
-}
-
-/// Returns everything up to and including the first required node.
-macro_rules! until_required {
-    ( $tokens:ident ) => { $tokens.non_exhaustive() };
-    ( $tokens:ident [$Token:ident] $( $rest:tt )* ) => { { token!($tokens $Token); $tokens } };
-    ( $tokens:ident [$Token:ident?] $( $rest:tt)* ) => { { token!($tokens $Token); until_required!( $tokens $( $rest )* ) } };
-    ( $tokens:ident [$Token:ident*] $( $rest:tt )* ) => { { token!($tokens $Token); until_required!( $tokens $( $rest )* ) } };
-    ( $tokens:ident ($Node:ident) $( $rest:tt )* ) => { { node!($tokens $Node); $tokens } };
-    ( $tokens:ident ($Node:ident?) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
-    ( $tokens:ident ($Node:ident[?]) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
-    ( $tokens:ident ($Node:ident*) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
-    ( $tokens:ident ($Node:ident[*]) $( $rest:tt )* ) => { { node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
-}
-
-/// Executes the given macro repeatedly, popping the first item on each step.
-macro_rules! repeat_until_empty {
-    ( $array:ident ) => { $array };
-    ( $array:ident $first:tt $( $rest:tt )* ) => { {
-        let array = $array.push({
-            let tokens = NestedTokenSet::new();
-            until_required!(tokens $first $( $rest )* )
-        });
-        repeat_until_empty!( array $( $rest )* )
-    } };
-}
-
+/// A [`NestedTokenSet`] containing the expected initial tokens for a given token or node.
 macro_rules! expected_tokens {
     ( [ $Token:ident $( $mode:tt )? ] ) => {
         NestedTokenSet::from_kind(TokenKind::$Token)
@@ -412,18 +26,14 @@ macro_rules! expected_tokens {
     };
 }
 
-macro_rules! tiny_parse_token {
-    ( $Token:ident $token_stream:ident $expect:tt ) => {{
-        Token::<token::$Token, Tiny>::new($token_stream.next($expect)?)
-    }};
-}
-
+/// Recursively parses a node.
 macro_rules! tiny_parse_node {
     ( $Node:ident $token_stream:ident $expect:tt ) => {
         $Node::<Tiny>::tiny_parse_nested($token_stream, $expect)?
     };
 }
 
+/// Recursively parses a repetition of tokens or nodes.
 macro_rules! tiny_parse_repetition {
     ( $tiny_parse_token_or_node:ident $Vec:ident $TokenOrNode:ident $token_stream:ident $matches:tt $expect:tt ) => { {
         let mut result = $Vec::new();
@@ -434,15 +44,16 @@ macro_rules! tiny_parse_repetition {
     } };
 }
 
+/// Recursively parses a single field of a concatenation.
 macro_rules! tiny_parse_by_mode {
     ( [$Token:ident] $token_stream:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_token!($Token $token_stream $expect)
+        tokens::$Token::parse_required($token_stream, $expect)?
     };
     ( ($Node:ident) $token_stream:ident match $matches:tt $expect:tt ) => {
         tiny_parse_node!($Node $token_stream $expect)
     };
     ( [$Token:ident?] $token_stream:ident match $matches:tt $expect:tt ) => {
-        if $token_stream.matches($matches) { Some(tiny_parse_token!($Token $token_stream $expect)) } else { None }
+        tokens::$Token::parse_optional($token_stream, $expect)?
     };
     ( ($Node:ident?) $token_stream:ident match $matches:tt $expect:tt ) => {
         if $token_stream.matches($matches) { Some(tiny_parse_node!($Node $token_stream $expect)) } else { None }
@@ -451,7 +62,7 @@ macro_rules! tiny_parse_by_mode {
         if $token_stream.matches($matches) { Some(Box::new(tiny_parse_node!($Node $token_stream $expect))) } else { None }
     };
     ( [$Token:ident*] $token_stream:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_repetition!(tiny_parse_token SmallVec $Token $token_stream $matches $expect)
+        tokens::$Token::parse_repetition($token_stream, $expect)?
     };
     ( ($Node:ident*) $token_stream:ident match $matches:tt $expect:tt ) => {
         tiny_parse_repetition!(tiny_parse_node SmallVec $Node $token_stream $matches $expect)
@@ -461,6 +72,7 @@ macro_rules! tiny_parse_by_mode {
     };
 }
 
+/// Iteratively parses a repetition of tokens or nodes.
 macro_rules! tiny_parse_node_repetition_iterative {
     ( $Node:ident $state:ident $original_expect:ident $field:ident $repetition:ident $matches:tt $expect:tt ) => { paste! {
         if !$repetition {
@@ -473,19 +85,16 @@ macro_rules! tiny_parse_node_repetition_iterative {
     } };
 }
 
+/// Iteratively parses a single field of a concatenation.
 macro_rules! tiny_parse_by_mode_iterative {
     ( [$Token:ident] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
-        $state.tokens.push($state.token_stream.next($expect)?);
+        tokens::$Token::tiny_push_required($state, $expect)?;
     } };
     ( ($Node:ident) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
         $state.push_parser::<$Node<Tiny>>($expect);
     };
     ( [$Token:ident?] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
-        if $state.token_stream.matches($matches) {
-            $state.tokens.push_some($state.token_stream.next($expect)?);
-        } else {
-            $state.tokens.push_none();
-        }
+        tokens::$Token::tiny_push_optional($state, $expect)?;
     } };
     ( ($Node:ident?) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
         if $state.token_stream.matches($matches) {
@@ -504,10 +113,7 @@ macro_rules! tiny_parse_by_mode_iterative {
         }
     };
     ( [$Token:ident*] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
-        $state.tokens.start_repetition();
-        while $state.token_stream.matches($matches) {
-            $state.tokens.push($state.token_stream.next($expect)?);
-        }
+        tokens::$Token::tiny_push_repetition($state, $expect)?;
     } };
     ( ($Node:ident*) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
         tiny_parse_node_repetition_iterative!($Node $state $original_expect $field $repetition $matches $expect)
@@ -517,6 +123,9 @@ macro_rules! tiny_parse_by_mode_iterative {
     };
 }
 
+/// Next [`Expect`] after the given field.
+///
+/// Also takes in an outer [`Expect`] that is used for non-exhaustive fields.
 macro_rules! expect_next_field {
     ( $Name:ident $field:ident $expect:ident ) => {
         paste! {
@@ -530,6 +139,9 @@ macro_rules! expect_next_field {
     };
 }
 
+/// The same [`Expect`] from the given field, used for repetitions.
+///
+/// Also takes in an outer [`Expect`] that is used for non-exhaustive fields.
 macro_rules! expect_same_field {
     ( $Name:ident $field:ident $expect:ident ) => { paste! { {
         let same_expected_tokens = Self::EXPECTED_TOKENS_FROM[[<$Name:snake>]::Field::[<$field:camel>]];
@@ -537,6 +149,9 @@ macro_rules! expect_same_field {
     } } };
 }
 
+/// What to expect after the given field.
+///
+/// For repetitions, this also includes the same field again, since it might repeat.
 macro_rules! expect_field {
     ( [$Token:ident] $Name:ident $field:ident $expect:ident ) => {
         expect_next_field!($Name $field $expect)
@@ -564,15 +179,71 @@ macro_rules! expect_field {
     };
 }
 
-macro_rules! tiny_parse_build_field {
+/// Executes the given macro repeatedly, popping the first item on each step.
+macro_rules! repeat_until_empty {
+    ( $array:ident ) => { $array };
+    ( $array:ident $first:tt $( $rest:tt )* ) => { {
+        let array = $array.push({
+            let tokens = NestedTokenSet::new();
+            until_required!(tokens $first $( $rest )* )
+        });
+        repeat_until_empty!( array $( $rest )* )
+    } };
+}
+
+/// Xors the given token into the given token set.
+macro_rules! xor_token {
+    ( $tokens:ident $Token:ident ) => {
+        let $tokens =
+            $tokens.xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token));
+    };
+}
+
+/// Xors the expected tokens of the given node into the given token set.
+macro_rules! xor_node {
+    ( $tokens:ident $Node:ident ) => {
+        let $tokens = $tokens.xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS);
+    };
+}
+
+/// Returns everything up to and including the first required node.
+macro_rules! until_required {
+    ( $tokens:ident ) => { $tokens.non_exhaustive() };
+    ( $tokens:ident [$Token:ident] $( $rest:tt )* ) => { { xor_token!($tokens $Token); $tokens } };
+    ( $tokens:ident [$Token:ident?] $( $rest:tt)* ) => { { xor_token!($tokens $Token); until_required!( $tokens $( $rest )* ) } };
+    ( $tokens:ident [$Token:ident*] $( $rest:tt )* ) => { { xor_token!($tokens $Token); until_required!( $tokens $( $rest )* ) } };
+    ( $tokens:ident ($Node:ident) $( $rest:tt )* ) => { { xor_node!($tokens $Node); $tokens } };
+    ( $tokens:ident ($Node:ident?) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
+    ( $tokens:ident ($Node:ident[?]) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
+    ( $tokens:ident ($Node:ident*) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
+    ( $tokens:ident ($Node:ident[*]) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
+}
+
+/// Converts a field specifier on a concatenation into the storage type.
+macro_rules! field_type {
+    ( [$Token:ident] ) => { <tokens::$Token as TokenStorage<S>>::Required };
+    ( [$Token:ident?] ) => { <tokens::$Token as TokenStorage<S>>::Optional };
+    ( [$Token:ident*] ) => { <tokens::$Token as TokenStorage<S>>::Repetition };
+    ( ($Node:ident) ) => { $Node<S> };
+    // While maybe useful, forbidding Box for unconditional nodes prevents unparsable grammars.
+    // However, I think, it is almost always better to box an optional node instead anyway.
+    // ( ($Node:ident[]) ) => { Box<$Node<S>> };
+    ( ($Node:ident?) ) => { Option<$Node<S>> };
+    ( ($Node:ident[?]) ) => { Option<Box<$Node<S>>> };
+    ( ($Node:ident*) ) => { SmallVec<[$Node<S>; 1]> };
+    ( ($Node:ident[*]) ) => { Vec<$Node<S>> };
+}
+
+/// Pops a concatenation field from the node/token stack.
+macro_rules! pop_field {
     ( [$Token:ident] $state:ident ) => {
-        Token::new($state.tokens.pop())
+        tokens::$Token::tiny_pop_required($state)
     };
     ( ($Node:ident) $state:ident ) => { paste! {
         NodeStack::<Tiny>::pop(&mut $state.nodes.[<$Node:snake>])
     } };
     ( [$Token:ident?] $state:ident ) => {
-        $state.tokens.pop_optional().map(Token::new)
+        tokens::$Token::tiny_pop_optional($state)
     };
     ( ($Node:ident?) $state:ident ) => { paste! {
         NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>])
@@ -581,7 +252,7 @@ macro_rules! tiny_parse_build_field {
         NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>]).map(Box::new)
     } };
     ( [$Token:ident*] $state:ident ) => {{
-        SmallVec::from_iter($state.tokens.pop_repetition().map(Token::new))
+        tokens::$Token::tiny_pop_repetition($state)
     }};
     ( ($Node:ident*) $state:ident ) => { paste! {
         SmallVec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
@@ -591,6 +262,7 @@ macro_rules! tiny_parse_build_field {
     } };
 }
 
+/// Implements `pop_final_node` for the given concatenation or alternation.
 macro_rules! impl_pop_final_node {
     ( $Name:ident ) => {
         paste! {
@@ -601,13 +273,7 @@ macro_rules! impl_pop_final_node {
     };
 }
 
-macro_rules! reverse {
-    () => {};
-    ( $first:tt $( $rest:tt )* ) => {
-        reverse!( $( $rest )* ); $first
-    };
-}
-
+/// Drains nested nodes of a single field into the given [`DroppedNodes`].
 macro_rules! drain_field_into_dropped_nodes {
     ( [$Token:ident] $nodes:ident $self:ident $field:ident ) => {};
     ( ($Node:ident) $nodes:ident $self:ident $field:ident ) => {
@@ -653,6 +319,8 @@ macro_rules! ensure_no_recursive_node_repetition_impl {
     } };
 }
 
+/// At compile time, ensures that the field of a node has no ambiguity caused by a trailing
+/// repetition back to the original type.
 macro_rules! ensure_no_recursive_node_repetition {
     ( $Name:ident ($Field:ident*) $field:ident ) => {
         ensure_no_recursive_node_repetition_impl!($Name $Field $field)
@@ -663,6 +331,7 @@ macro_rules! ensure_no_recursive_node_repetition {
     ( $Name:ident $Field:tt $field:ident ) => {};
 }
 
+/// Pastes the statement only if the field is a node and not a token.
 macro_rules! if_node {
     ( ($Node:ident $( $kind:tt )? ) $stmt:tt ) => {
         $stmt
@@ -670,6 +339,7 @@ macro_rules! if_node {
     ( [$Token:ident $( $kind:tt )? ] $stmt:tt ) => {};
 }
 
+/// Accesses a field within a [`NodeSet`].
 macro_rules! nodes_dot_field {
     ( $nodes:ident ($Field:ident $( $kind:tt )? ) ) => {
         paste! {
@@ -678,6 +348,17 @@ macro_rules! nodes_dot_field {
     };
 }
 
+/// Reverses the order of the given list of code blocks.
+macro_rules! reverse {
+    () => {};
+    ( $first:tt $( $rest:tt )* ) => {
+        reverse!( $( $rest )* ); $first
+    };
+}
+
+/// Implements a concatenation node, that supports both optionals and repetitions.
+///
+/// Fields can be both tokens as well as nodes.
 macro_rules! impl_struct_parse {
     ( $Name:ident {
         $( $field:ident: $Field:tt, )*
@@ -685,6 +366,7 @@ macro_rules! impl_struct_parse {
         mod [<$Name:snake>] {
             use enum_map::Enum;
 
+            /// Identifies a single field within a concatenation node.
             #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Enum)]
             pub(crate) enum Field {
                 #[default]
@@ -692,6 +374,7 @@ macro_rules! impl_struct_parse {
             }
 
             impl Field {
+                /// Returns the next field of the concatenation, if one exists.
                 pub(crate) fn next(self) -> Option<Self> {
                     let index = self.into_usize();
                     (index < Self::LENGTH - 1).then(|| Self::from_usize(index + 1))
@@ -699,6 +382,7 @@ macro_rules! impl_struct_parse {
             }
         }
 
+        /// A concatenation node within a grammar.
         pub(crate) struct $Name<S: Style> {
            $( $field: field_type!($Field), )*
         }
@@ -728,17 +412,20 @@ macro_rules! impl_struct_parse {
         impl<S: Style> Eq for $Name<S> {}
 
         impl<S: Style> $Name<S> {
-            /// Expected tokens for a given field only, even if it is not required.
+            /// Expected tokens for *only* the given field, even if it is not required.
             const EXPECTED_TOKENS_AT: EnumMap<[<$Name:snake>]::Field, TokenSet> = EnumMap::from_array([
                 $( expected_tokens!($Field).tokens, )*
             ]);
 
-            /// Expected tokens for a given field, including everything up until the first required field.
+            /// Expected tokens for a given field, including everything up until and including the next required field.
             const EXPECTED_TOKENS_FROM: EnumMap<[<$Name:snake>]::Field, NestedTokenSet> = EnumMap::from_array({
                 let array = PushArray([]);
                 repeat_until_empty!(array $( $Field )* ).0
             });
 
+            /// The last required field as well as everything after.
+            ///
+            /// Used to check for recursion that would lead to ambiguity in the grammar.
             const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = {
                 let mut nodes = NodeSet::new();
                 $( if_node!($Field {
@@ -750,6 +437,7 @@ macro_rules! impl_struct_parse {
                 nodes
             };
 
+            /// Moves nodes from `self` into the given [`DroppedNodes`].
             fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
                 $( drain_field_into_dropped_nodes!($Field nodes self $field); )*
             }
@@ -786,7 +474,7 @@ macro_rules! impl_struct_parse {
                 if field == [<$Name:snake>]::Field::LENGTH {
                     $( let $field; )*
                     reverse!( $( {
-                        $field = tiny_parse_build_field!($Field state)
+                        $field = pop_field!($Field state)
                     } )* );
                     state.nodes.[<$Name:snake>].push(Self { $( $field, )* });
                     return Some(());
@@ -814,18 +502,112 @@ macro_rules! impl_struct_parse {
     } };
 }
 
+/// Implements an alternation node.
+///
+/// Variants can be both tokens and nodes.
+macro_rules! impl_enum_parse {
+    ( $Name:ident {
+        $( [$Token:ident], )*
+        $( ($Node:ident), )*
+    } ) => { paste! {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub(crate) enum $Name<S: Style> {
+            $( $Token(<tokens::$Token as TokenStorage<S>>::Required), )*
+            $( $Node($Node<S>), )*
+        }
+
+        impl<S: Style> $Name<S> {
+            /// The last required field as well as everything after.
+            ///
+            /// Used to check for recursion that would lead to ambiguity in the grammar.
+            const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = NodeSet {
+                $( [<$Node:snake>]: true, )*
+                ..NodeSet::new()
+            };
+
+            /// Moves nodes from `self` into the given [`DroppedNodes`].
+            fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
+                match self {
+                    $( Self::$Node(node) => node.drain_into_dropped_nodes(nodes), )*
+                    _ => {}
+                }
+            }
+        }
+
+        const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
+
+        impl TinyParseImpl for $Name<Tiny> {
+            const EXPECTED_TOKENS: NestedTokenSet = {
+                NestedTokenSet::new()
+                    $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )*
+                    $( .xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS) )*
+            };
+
+            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<Self> {
+                let found = token_stream.kind();
+
+                $( if found == TokenKind::$Token {
+                    return Some(Self::$Token(tokens::$Token::parse_required(token_stream, expect)?));
+                } )*
+
+                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
+                    return Some(Self::$Node($Node::<Tiny>::tiny_parse_nested(token_stream, expect)?));
+                } )*
+
+                unreachable!("token should match one of the above cases");
+            }
+
+            fn tiny_parse_iterative(
+                state: &mut TinyParseState<impl TinyTokenStream>,
+                expect: Expect,
+                field: usize,
+                _repetition: bool,
+            ) -> Option<()> {
+                if field == 1 {
+                    let node = match state.nodes.pop_kind() {
+                        $( NodeKind::$Node => Self::$Node(NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>])), )*
+                        _ => unreachable!("node should match one of the above cases"),
+                    };
+                    state.nodes.[<$Name:snake>].push(node);
+                    return Some(());
+                }
+
+                let found = state.token_stream.kind();
+
+                $( if found == TokenKind::$Token {
+                    state.nodes.[<$Name:snake>].push(Self::$Token(tokens::$Token::parse_required(&mut state.token_stream, expect)?));
+                    return Some(());
+                } )*
+
+                state.push_build_enum::<Self>(expect);
+
+                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
+                    state.nodes.push_kind(NodeKind::$Node);
+                    state.push_parser::<$Node<Tiny>>(expect);
+                    return Some(());
+                } )*
+
+                unreachable!("token should match one of the above cases");
+            }
+
+            impl_pop_final_node!($Name);
+        }
+    } };
+}
+
+/// Implements a full grammar made up of concatenation and alternation nodes.
 macro_rules! impl_node_parse {
     ( $( $kind:ident $Name:ident $content:tt )* ) => { paste! {
+        /// The various kinds of nodes.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum NodeKind {
             $( $Name, )*
         }
 
-        type Kinds = SmallVec<[NodeKind; 16]>;
-        const _: () = assert!(std::mem::size_of::<Kinds>() <= 24);
-
-        type Repetition = SmallVec<[usize; 2]>;
-
+        /// A stack of nodes used by the parser.
+        ///
+        /// Storage is optimized to be very compact, but care has to be taken, that matching
+        /// functions are called in the right order.
         #[derive(Clone, Debug, PartialEq, Eq)]
         struct NodeStack<S: Style> {
             $( [<$Name:snake>]: Vec<$Name<S>>, )*
@@ -834,18 +616,110 @@ macro_rules! impl_node_parse {
             _repetition: Repetition,
         }
 
-        /// Used to avoid recursion on dropping of nodes.
+        impl<S: Style> NodeStack<S> {
+            /// Creates a new empty stack.
+            fn new() -> Self {
+                Self {
+                    $( [<$Name:snake>]: Vec::new(), )*
+                    _kinds: Kinds::new(),
+                    _optional: BitVec::new(),
+                    _repetition: Repetition::new(),
+                }
+            }
+
+            /// Consumes `self` and returns if all fields are empty, which should always be the case
+            /// at the end of parsing.
+            fn finish(self) -> bool {
+                self._optional.is_empty()
+                    && self._repetition.is_empty()
+                    && $( self.[<$Name:snake>].is_empty() )&&*
+            }
+        }
+
+        /// A set of node kinds, meant to be used in `const` contexts.
+        #[derive(Clone, Copy, Debug)]
+        struct NodeSet {
+            $( [<$Name:snake>]: bool, )*
+        }
+
+        impl NodeSet {
+            /// Constructs an empty set.
+            const fn new() -> Self {
+                Self {
+                    $( [<$Name:snake>]: false, )*
+                }
+            }
+
+            /// Whether the set is empty.
+            const fn is_empty(self) -> bool {
+                true $( && !self.[<$Name:snake>] )*
+            }
+
+            /// Checks for recursion within [`LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES`].
+            ///
+            /// - `self` should contain the initial field that is being checked
+            /// - `banned_node` should be the node that the field resides in, since a recursion
+            ///   back to this type is not allowed
+            /// - `checked_nodes` should be empty and is only used for recursion to remember which
+            ///   nodes were already checked
+            const fn any_recursive_node(self, banned_node: NodeSet, mut checked_nodes: NodeSet) -> bool {
+                if self.contains_any(banned_node) {
+                    // a field that recurses back to the original node was found
+                    return true;
+                }
+
+                // no need to check this field again in the future
+                checked_nodes = checked_nodes.add(self);
+
+                let mut recursive_nodes = Self::new();
+
+                $( if self.[<$Name:snake>] {
+                    recursive_nodes = recursive_nodes.add($Name::<Tiny>::LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES);
+                } )*
+
+                // ignore any of the already checked node kinds
+                recursive_nodes = recursive_nodes.remove(checked_nodes);
+
+                // if recursive nodes is empty, no recursion was found; otherwise, recurse
+                !recursive_nodes.is_empty() && recursive_nodes.any_recursive_node(banned_node, checked_nodes)
+            }
+
+            /// Merges a set with another one.
+            const fn add(self, nodes: NodeSet) -> Self {
+                Self {
+                    $( [<$Name:snake>]: self.[<$Name:snake>] || nodes.[<$Name:snake>], )*
+                }
+            }
+
+            /// Removes a set of nodes from this one.
+            const fn remove(self, nodes: NodeSet) -> Self {
+                Self {
+                    $( [<$Name:snake>]: self.[<$Name:snake>] && !nodes.[<$Name:snake>], )*
+                }
+            }
+
+            /// Whether the set contains any of the given nodes.
+            const fn contains_any(self, nodes: NodeSet) -> bool {
+                $( self.[<$Name:snake>] && nodes.[<$Name:snake>] )||*
+            }
+        }
+
+        /// Contains a [`Vec`] for each type of node; used to avoid recursion on dropping of nodes.
         struct DroppedNodes<S: Style> {
             $( [<$Name:snake>]: Vec<$Name<S>>, )*
         }
 
         impl<S: Style> DroppedNodes<S> {
+            /// Creates a new empty instance, ready to be filled.
             fn new() -> Self {
                 Self { $( [<$Name:snake>]: Vec::new(), )* }
             }
         }
 
         impl<S: Style> Drop for DroppedNodes<S> {
+            /// Drops nodes as well as all their nested nodes without recursion.
+            ///
+            /// Recursion is avoided by flattening the nested nodes.
             fn drop(&mut self) {
                 loop {
                     let mut empty = true;
@@ -865,123 +739,94 @@ macro_rules! impl_node_parse {
             }
         }
 
-        impl<S: Style> Default for NodeStack<S> {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-        impl<S: Style> NodeStack<S> {
-            fn new() -> Self {
-                Self {
-                    $( [<$Name:snake>]: Vec::new(), )*
-                    _kinds: Kinds::new(),
-                    _optional: BitVec::new(),
-                    _repetition: SmallVec::new(),
-                }
-            }
-
-            /// Intentionally consumes self, signifying that this is the last operation.
-            fn is_empty(self) -> bool {
-                self._optional.is_empty()
-                    && self._repetition.is_empty()
-                    && $( self.[<$Name:snake>].is_empty() )&&*
-            }
-
-            fn push_kind(&mut self, kind: NodeKind) {
-                self._kinds.push(kind);
-            }
-
-            fn pop_kind(&mut self) -> NodeKind {
-                self._kinds.pop().expect("kinds should not be empty")
-            }
-
-            fn push<T>(fields: &mut Vec<T>, node: T) {
-                fields.push(node);
-            }
-
-            fn pop<T>(fields: &mut Vec<T>) -> T {
-                fields.pop().expect("fields should not be empty")
-            }
-
-            fn push_some(&mut self) {
-                self._optional.push(true);
-            }
-
-            fn push_none(&mut self) {
-                self._optional.push(false);
-            }
-
-            fn pop_optional<T>(optional: &mut BitVec, fields: &mut Vec<T>) -> Option<T> {
-                optional.pop().expect("optional should not be empty").then(|| Self::pop(fields))
-            }
-
-            fn start_repetition<T>(repetition: &mut Repetition, fields: &Vec<T>) {
-                repetition.push(fields.len());
-            }
-
-            fn pop_repetition<'a, T>(repetition: &mut SmallVec<[usize; 2]>, fields: &'a mut Vec<T>) -> impl ExactSizeIterator<Item = T> + 'a {
-                let start = repetition.pop().expect("repetitions should not be empty");
-                fields.drain(start..)
-            }
-        }
-
-        #[derive(Clone, Copy, Debug)]
-        struct NodeSet {
-            $( [<$Name:snake>]: bool, )*
-        }
-
-        impl NodeSet {
-            const fn new() -> Self {
-                Self {
-                    $( [<$Name:snake>]: false, )*
-                }
-            }
-
-            const fn is_empty(self) -> bool {
-                true
-                    $( && !self.[<$Name:snake>] )*
-            }
-
-            const fn any_recursive_node(self, banned_node: NodeSet, mut checked_nodes: NodeSet) -> bool {
-                if self.contains_any(banned_node) {
-                    return true;
-                }
-                checked_nodes = checked_nodes.add(self);
-
-                let mut recursive_nodes = Self::new();
-
-                $( if self.[<$Name:snake>] {
-                    recursive_nodes = recursive_nodes.add($Name::<Tiny>::LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES);
-                } )*
-
-                recursive_nodes = recursive_nodes.remove(checked_nodes);
-                !recursive_nodes.is_empty() && recursive_nodes.any_recursive_node(banned_node, checked_nodes)
-            }
-
-            const fn add(self, nodes: NodeSet) -> Self {
-                Self {
-                    $( [<$Name:snake>]: self.[<$Name:snake>] || nodes.[<$Name:snake>], )*
-                }
-            }
-            const fn remove(self, nodes: NodeSet) -> Self {
-                Self {
-                    $( [<$Name:snake>]: self.[<$Name:snake>] && !nodes.[<$Name:snake>], )*
-                }
-            }
-
-            const fn contains_any(self, nodes: NodeSet) -> bool {
-                $( self.[<$Name:snake>] && nodes.[<$Name:snake>] )||*
-            }
-        }
-
         $( impl_node_parse!(#inner $kind $Name $content); )*
     } };
-    ( #inner struct $Name:ident $content:tt ) => {
-        impl_struct_parse!($Name $content);
-    };
-    ( #inner enum $Name:ident $content:tt ) => {
-        impl_enum_parse!($Name $content);
+    ( #inner struct $Name:ident $content:tt ) => { impl_struct_parse!($Name $content); };
+    ( #inner enum $Name:ident $content:tt ) => { impl_enum_parse!($Name $content); };
+}
+
+/// A list of [`NodeKind`]s.
+type Kinds = SmallVec<[NodeKind; 16]>;
+const _: () = assert!(std::mem::size_of::<Kinds>() <= 24);
+
+/// A list of repetition-end markers.
+type Repetition = SmallVec<[usize; 2]>;
+
+impl<S: Style> Default for NodeStack<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: Style> NodeStack<S> {
+    /// Only pushes a [`NodeKind`].
+    ///
+    /// This should be accompanied by a matching call to [`Self::push<T>()`].
+    fn push_kind(&mut self, kind: NodeKind) {
+        self._kinds.push(kind);
+    }
+
+    /// Only pops a [`NodeKind`].
+    ///
+    /// This should be accompanied by a matching call to [`Self::pop<T>()`].
+    fn pop_kind(&mut self) -> NodeKind {
+        self._kinds.pop().expect("kinds should not be empty")
+    }
+
+    /// Pushes a new node into the given stack.
+    ///
+    /// This should be accompanied by a matching call to [`Self::push_kind()`].
+    fn push<T>(fields: &mut Vec<T>, node: T) {
+        fields.push(node);
+    }
+
+    /// Pops a node from the given stack.
+    ///
+    /// This should be accompanied by a matching call to [`Self::pop_kind()`].
+    fn pop<T>(fields: &mut Vec<T>) -> T {
+        fields.pop().expect("fields should not be empty")
+    }
+
+    /// Pushes a new marker for an optional node that exists.
+    ///
+    /// This should therefore be accompanied by pushing of the actual node and kind.
+    fn push_some(&mut self) {
+        self._optional.push(true);
+    }
+
+    /// Pushes a new marker for an optional node that does not exist.
+    ///
+    /// No node or kind must be pushed in this case.
+    fn push_none(&mut self) {
+        self._optional.push(false);
+    }
+
+    /// Pops an optional node from the given stack.
+    ///
+    /// `optional` is passed in manually to avoid multiple mutable borrows to `self`.
+    fn pop_optional<T>(optional: &mut BitVec, fields: &mut Vec<T>) -> Option<T> {
+        optional
+            .pop()
+            .expect("optional should not be empty")
+            .then(|| Self::pop(fields))
+    }
+
+    /// Marks the start of a new repetition of a specific kind of node.
+    ///
+    /// `repetition` is passed in manually to avoid multiple mutable borrows to `self`.
+    fn start_repetition<T>(repetition: &mut Repetition, fields: &Vec<T>) {
+        repetition.push(fields.len());
+    }
+
+    /// Pops a repetition of a specific kind of node as an [`ExactSizeIterator`].
+    ///
+    /// `repetition` is passed in manually to avoid multiple mutable borrows to `self`.
+    fn pop_repetition<'a, T>(
+        repetition: &mut SmallVec<[usize; 2]>,
+        fields: &'a mut Vec<T>,
+    ) -> impl ExactSizeIterator<Item = T> + 'a {
+        let start = repetition.pop().expect("repetitions should not be empty");
+        fields.drain(start..)
     }
 }
 

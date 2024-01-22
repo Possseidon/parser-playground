@@ -1,10 +1,9 @@
-use std::{fmt, marker::PhantomData, num::NonZeroUsize};
+use std::{fmt, num::NonZeroUsize};
 
 use enum_map::Enum;
 use paste::paste;
+use smallvec::SmallVec;
 use smol_str::SmolStr;
-
-use crate::lexer::PositionedLexerToken;
 
 macro_rules! impl_token_kind {
     (
@@ -25,10 +24,56 @@ macro_rules! impl_token_kind {
         }
 
         impl TokenKind {
-            /// Returns symbols and keywords as text. Panics for dynamic tokens like identifiers.
+            pub(crate) const fn as_dynamic(self) -> Option<DynamicTokenKind> {
+                match self {
+                    $( Self::$Dynamic => Some(DynamicTokenKind::$Dynamic), )*
+                    _ => None,
+                }
+            }
+
+            pub(crate) const fn as_fixed(self) -> Option<FixedTokenKind> {
+                match self {
+                    $( Self::$Keyword => Some(FixedTokenKind::$Keyword), )*
+                    $( Self::$Symbol => Some(FixedTokenKind::$Symbol), )*
+                    $( Self::$Char => Some(FixedTokenKind::$Char), )*
+                    _ => None,
+                }
+            }
+        }
+
+        impl From<DynamicTokenKind> for TokenKind {
+            fn from(kind: DynamicTokenKind) -> Self {
+                match kind {
+                    $( DynamicTokenKind::$Dynamic => Self::$Dynamic, )*
+                }
+            }
+        }
+
+        impl From<FixedTokenKind> for TokenKind {
+            fn from(kind: FixedTokenKind) -> Self {
+                match kind {
+                    $( FixedTokenKind::$Keyword => Self::$Keyword, )*
+                    $( FixedTokenKind::$Symbol => Self::$Symbol, )*
+                    $( FixedTokenKind::$Char => Self::$Char, )*
+                }
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+        pub(crate) enum DynamicTokenKind {
+            $( $Dynamic, )*
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+        pub(crate) enum FixedTokenKind {
+            $( $Keyword, )*
+            $( $Symbol, )*
+            $( $Char, )*
+        }
+
+        impl FixedTokenKind {
             const fn text(self) -> &'static str {
                 match self {
-                    $( Self::$Dynamic )|* => panic!("dynamic tokens have no static text"),
                     $( Self::$Keyword => $keyword, )*
                     $( Self::$Symbol => $symbol, )*
                     $( Self::$Char => $char, )*
@@ -59,50 +104,160 @@ macro_rules! impl_token_kind {
             }
         }
 
-        pub(crate) mod token {
-            use super::{Kind, Style, TokenKind};
+        pub(crate) mod tokens {
+            use crate::{
+                lexer::{TinyTokenStream, CheckedTinyTokenStream},
+                parser::tiny::TinyParseState,
+            };
+
+            use super::{Expect, Style, TokenStorage, Tiny, TokenKind, TokenSet};
 
             $(
-                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
                 pub(crate) struct $Dynamic;
 
-                impl Kind for $Dynamic {
-                    const KIND: TokenKind = TokenKind::$Dynamic;
-                    type Repr<S: Style> = S::Dynamic<Self>;
+                impl<S: Style> TokenStorage<S> for $Dynamic {
+                    type Required = S::DynamicRequired;
+                    type Optional = S::DynamicOptional;
+                    type Repetition = S::DynamicRepetition;
+                }
+
+                impl $Dynamic {
+                    pub(crate) fn parse_required(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Required> {
+                        token_stream.next(expect)
+                    }
+
+                    pub(crate) fn parse_optional(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Optional> {
+                        Some(if token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
+                            Some(token_stream.next(expect)?)
+                        } else {
+                            None
+                        })
+                    }
+
+                    pub(crate) fn parse_repetition(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Repetition> {
+                        let mut result = <Self as TokenStorage<Tiny>>::Repetition::new();
+                        while token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
+                            result.push(token_stream.next(expect)?);
+                        }
+                        Some(result)
+                    }
+
+
+                    pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                        state.tokens.push_dynamic(state.token_stream.next(expect)?);
+                        Some(())
+                    }
+
+                    pub(crate) fn tiny_pop_required(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Required {
+                        state.tokens.pop_dynamic()
+                    }
+
+                    pub(crate) fn tiny_push_optional(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                        if state.token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
+                            state.tokens.push_dynamic_some(state.token_stream.next(expect)?);
+                        } else {
+                            state.tokens.push_none();
+                        }
+                        Some(())
+                    }
+
+                    pub(crate) fn tiny_pop_optional(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Optional {
+                        state.tokens.pop_dynamic_optional()
+                    }
+
+                    pub(crate) fn tiny_push_repetition(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                        state.tokens.start_dynamic_repetition();
+                        while state.token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
+                            state.tokens.push_dynamic(state.token_stream.next(expect)?);
+                        }
+                        Some(())
+                    }
+
+                    pub(crate) fn tiny_pop_repetition(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Repetition {
+                        state.tokens.pop_dynamic_repetition().collect()
+                    }
                 }
             )*
 
-            $(
-                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-                pub(crate) struct $Keyword;
-
-                impl Kind for $Keyword {
-                    const KIND: TokenKind = TokenKind::$Keyword;
-                    type Repr<S: Style> = S::Fixed<Self>;
-                }
-            )*
-
-            $(
-                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-                pub(crate) struct $Symbol;
-
-                impl Kind for $Symbol {
-                    const KIND: TokenKind = TokenKind::$Symbol;
-                    type Repr<S: Style> = S::Fixed<Self>;
-                }
-            )*
-
-            $(
-                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-                pub(crate) struct $Char;
-
-                impl Kind for $Char {
-                    const KIND: TokenKind = TokenKind::$Char;
-                    type Repr<S: Style> = S::Fixed<Self>;
-                }
-            )*
+            impl_fixed_token_kind!( $( $Keyword )* $( $Symbol )* $( $Char )* );
         }
     };
+}
+
+macro_rules! impl_fixed_token_kind {
+    ( $( $Kind:ident )* ) => { $(
+        pub(crate) struct $Kind;
+
+        impl<S: Style> TokenStorage<S> for $Kind {
+            type Required = S::FixedRequired;
+            type Optional = S::FixedOptional;
+            type Repetition = S::FixedRepetition;
+        }
+
+        impl $Kind {
+            pub(crate) fn parse_required(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Required> {
+                token_stream.next(expect)?;
+                Some(())
+            }
+
+            pub(crate) fn parse_optional(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Optional> {
+                let result = token_stream.matches(TokenSet::from_kind(TokenKind::$Kind));
+                if result {
+                    token_stream.next(expect)?;
+                }
+                Some(result)
+            }
+
+            pub(crate) fn parse_repetition(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Repetition> {
+                let mut count = 0;
+                while token_stream.matches(TokenSet::from_kind(TokenKind::$Kind)) {
+                    token_stream.next(expect)?;
+                    count += 1;
+                }
+                Some(count)
+            }
+
+            pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                Some(())
+            }
+
+            pub(crate) fn tiny_pop_required(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Required {}
+
+            pub(crate) fn tiny_push_optional(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                if state.token_stream.matches(TokenSet::from_kind(TokenKind::$Kind)) {
+                    state.token_stream.next(expect)?;
+                    state.tokens.push_fixed_some();
+                } else {
+                    state.tokens.push_none();
+                }
+                Some(())
+            }
+
+            pub(crate) fn tiny_pop_optional(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Optional {
+                state.tokens.pop_fixed_optional()
+            }
+
+            pub(crate) fn tiny_push_repetition(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                let mut count = 0;
+                while state.token_stream.matches(TokenSet::from_kind(TokenKind::$Kind)) {
+                    state.token_stream.next(expect)?;
+                    count += 1;
+                }
+                state.tokens.push_fixed_repetition(count);
+                Some(())
+            }
+
+            pub(crate) fn tiny_pop_repetition(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Repetition {
+                state.tokens.pop_fixed_repetition()
+            }
+        }
+    )* };
+}
+
+pub(crate) trait TokenStorage<S: Style> {
+    type Required;
+    type Optional;
+    type Repetition;
 }
 
 impl_token_kind! {
@@ -202,8 +357,8 @@ impl_token_kind! {
     "}" b'}' RCurly
 }
 
-impl TokenKind {
-    /// Returns the length of symbols and keywords. Panics for dynamic tokens like identifiers.
+impl FixedTokenKind {
+    /// Returns the length of symbols and keywords.
     pub(crate) const fn len(self) -> NonZeroUsize {
         match NonZeroUsize::new(self.text().len()) {
             Some(val) => val,
@@ -212,220 +367,40 @@ impl TokenKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TinyFixedTokenRepr<K: Kind> {
-    _kind: PhantomData<*const K>,
-}
+pub(crate) trait Style: Clone + fmt::Debug + PartialEq + Eq {
+    type FixedRequired: Clone + fmt::Debug + PartialEq + Eq;
+    type FixedOptional: Clone + fmt::Debug + PartialEq + Eq;
+    type FixedRepetition: Clone + fmt::Debug + PartialEq + Eq;
 
-impl<K: Kind> TinyToken for TinyFixedTokenRepr<K> {
-    fn new(_text: SmolStr) -> Self {
-        Self { _kind: PhantomData }
-    }
-
-    fn text(self) -> SmolStr {
-        K::KIND.text().into()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TinyDynamicTokenRepr<K: Kind> {
-    text: SmolStr,
-    _kind: PhantomData<*const K>,
-}
-
-impl<K: Kind> TinyToken for TinyDynamicTokenRepr<K> {
-    fn new(text: SmolStr) -> Self {
-        Self {
-            text,
-            _kind: PhantomData,
-        }
-    }
-
-    fn text(self) -> SmolStr {
-        self.text
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PositionedFixedTokenRepr<K: Kind> {
-    pos: usize,
-    trailing_whitespace_len: usize,
-    _kind: PhantomData<*const K>,
-}
-
-impl<K: Kind> PositionedToken for PositionedFixedTokenRepr<K> {
-    fn new(token: PositionedLexerToken) -> Self {
-        Self {
-            pos: token.pos,
-            trailing_whitespace_len: token.trailing_whitespace_len,
-            _kind: PhantomData,
-        }
-    }
-
-    fn pos(self) -> usize {
-        self.pos
-    }
-
-    fn len(self) -> NonZeroUsize {
-        K::KIND.len()
-    }
-
-    fn trailing_whitespace_len(self) -> usize {
-        self.trailing_whitespace_len
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PositionedDynamicTokenRepr<K: Kind> {
-    pos: usize,
-    len: NonZeroUsize,
-    trailing_whitespace_len: usize,
-    _kind: PhantomData<*const K>,
-}
-
-impl<K: Kind> PositionedToken for PositionedDynamicTokenRepr<K> {
-    fn new(token: PositionedLexerToken) -> Self {
-        Self {
-            pos: token.pos,
-            len: token.len,
-            trailing_whitespace_len: token.trailing_whitespace_len,
-            _kind: PhantomData,
-        }
-    }
-
-    fn pos(self) -> usize {
-        self.pos
-    }
-
-    fn len(self) -> NonZeroUsize {
-        self.len
-    }
-
-    fn trailing_whitespace_len(self) -> usize {
-        self.trailing_whitespace_len
-    }
-}
-
-/// Whether the token is [`Tiny`] or [`Positioned`].
-///
-/// Trait bounds on [`Clone`] and [`Debug`] are a hack to simplify `#[derive(Clone, Debug)]` on AST
-/// node types.
-pub(crate) trait Style: Clone + fmt::Debug + PartialEq + std::cmp::Eq {
-    type Fixed<K: Kind>: Clone + fmt::Debug + PartialEq + std::cmp::Eq;
-    type Dynamic<K: Kind>: Clone + fmt::Debug + PartialEq + std::cmp::Eq;
+    type DynamicRequired: Clone + fmt::Debug + PartialEq + Eq;
+    type DynamicOptional: Clone + fmt::Debug + PartialEq + Eq;
+    type DynamicRepetition: Clone + fmt::Debug + PartialEq + Eq;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Tiny;
 
 impl Style for Tiny {
-    type Fixed<K: Kind> = TinyFixedTokenRepr<K>;
-    type Dynamic<K: Kind> = TinyDynamicTokenRepr<K>;
+    type FixedRequired = ();
+    type FixedOptional = bool;
+    type FixedRepetition = usize;
+
+    type DynamicRequired = SmolStr;
+    type DynamicOptional = Option<SmolStr>;
+    type DynamicRepetition = SmallVec<[SmolStr; 1]>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Positioned;
 
 impl Style for Positioned {
-    type Fixed<K: Kind> = PositionedFixedTokenRepr<K>;
-    type Dynamic<K: Kind> = PositionedDynamicTokenRepr<K>;
-}
+    type FixedRequired = ();
+    type FixedOptional = ();
+    type FixedRepetition = ();
 
-pub(crate) trait Kind: Clone + Copy + fmt::Debug + PartialEq + std::cmp::Eq {
-    const KIND: TokenKind;
-    type Repr<S: Style>: Clone + fmt::Debug + PartialEq + std::cmp::Eq;
-}
-
-/// Very small memory footprint for parsing, but is not capable of producing good error messages.
-///
-/// This is intended be used for "optimistic parsing". When you already know up front, that the
-/// source code *should* be valid, this is more efficient.
-///
-/// Unlike [`PositionedToken`], this does not require the original source code. However, to make up
-/// for this, it uses [`SmolStr`] internally, which means not all tokens can be [`Copy`] (since
-/// [`SmolStr`] itself is not [`Copy`]). Clones are still very cheap though (usually just as cheap
-/// as [`Copy`], worst case incrementing the ref-count of an [`Arc`](std::sync::Arc) for e.g. long
-/// identifiers).
-///
-/// Formatting is not supported, since this representation loses all information about whitespace,
-/// including comments.
-pub(crate) trait TinyToken: Clone {
-    fn new(text: SmolStr) -> Self;
-    fn text(self) -> SmolStr;
-}
-
-/// Positioned tokens that point at the original source code.
-///
-/// This is required for proper error messages.
-pub(crate) trait PositionedToken: Copy {
-    /// Assumes that the current token has the correct kind.
-    ///
-    /// This check should already have happened via `EXPECTED_TOKENS`.
-    fn new(token: PositionedLexerToken) -> Self;
-    fn pos(self) -> usize;
-    fn len(self) -> NonZeroUsize;
-    fn trailing_whitespace_len(self) -> usize;
-}
-
-pub(crate) struct Token<K: Kind, S: Style>(K::Repr<S>);
-
-impl<K: Kind, S: Style> fmt::Debug for Token<K, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Token").field(&self.0).finish()
-    }
-}
-
-impl<K: Kind, S: Style> Clone for Token<K, S> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<K: Kind, S: Style> Copy for Token<K, S> where K::Repr<S>: Copy {}
-
-impl<K: Kind, S: Style> PartialEq for Token<K, S>
-where
-    K::Repr<S>: PartialEq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl<K: Kind, S: Style> std::cmp::Eq for Token<K, S> where K::Repr<S>: std::cmp::Eq {}
-
-impl<K: Kind> TinyToken for Token<K, Tiny>
-where
-    K::Repr<Tiny>: TinyToken,
-{
-    fn new(text: SmolStr) -> Self {
-        Self(<K::Repr<Tiny> as TinyToken>::new(text))
-    }
-
-    fn text(self) -> SmolStr {
-        self.0.text()
-    }
-}
-
-impl<K: Kind> PositionedToken for Token<K, Positioned>
-where
-    K::Repr<Positioned>: PositionedToken,
-{
-    fn new(token: PositionedLexerToken) -> Self {
-        Self(<K::Repr<Positioned> as PositionedToken>::new(token))
-    }
-
-    fn pos(self) -> usize {
-        self.0.pos()
-    }
-
-    fn len(self) -> NonZeroUsize {
-        self.0.len()
-    }
-
-    fn trailing_whitespace_len(self) -> usize {
-        self.0.trailing_whitespace_len()
-    }
+    type DynamicRequired = ();
+    type DynamicOptional = ();
+    type DynamicRepetition = ();
 }
 
 #[derive(Clone, Copy, Default, Hash, PartialEq, Eq)]

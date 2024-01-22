@@ -5,7 +5,7 @@ use std::{
 
 use smol_str::SmolStr;
 
-use crate::token::{Expect, TokenKind, TokenSet};
+use crate::token::{Expect, FixedTokenKind, TokenKind, TokenSet};
 
 pub(crate) struct TinyLexerToken {
     pub(crate) kind: TokenKind,
@@ -28,7 +28,7 @@ impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
         let mut result = Self {
             token_stream,
             current_kind: None,
-            next_token: SmolStr::new_inline(""),
+            next_token: SmolStr::default(),
         };
         result.next(expect)?; // replace empty current token with actual first token
         Some(result)
@@ -170,16 +170,16 @@ impl<'code> TinyLexer<'code> {
             let ident_len = rest
                 .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .unwrap_or(rest.len());
-            if let Some(keyword) = TokenKind::parse_keyword(rest[..ident_len].as_bytes()) {
-                (keyword, ident_len, false)
+            if let Some(keyword) = FixedTokenKind::parse_keyword(rest[..ident_len].as_bytes()) {
+                (keyword.into(), ident_len, false)
             } else {
                 (TokenKind::Ident, ident_len, true)
             }
-        } else if let Some((symbol, len)) = TokenKind::parse_symbol(rest.as_bytes()) {
-            (symbol, len, false)
+        } else if let Some((symbol, len)) = FixedTokenKind::parse_symbol(rest.as_bytes()) {
+            (symbol.into(), len, false)
         } else {
-            let kind = TokenKind::parse_char(rest.as_bytes()[0])?;
-            (kind, 1, false)
+            let kind = FixedTokenKind::parse_char(rest.as_bytes()[0])?;
+            (kind.into(), 1, false)
         };
 
         self.pos += len;
@@ -188,7 +188,7 @@ impl<'code> TinyLexer<'code> {
             text: if dynamic {
                 rest[..len].into()
             } else {
-                SmolStr::new_inline("")
+                SmolStr::default()
             },
         })
     }
