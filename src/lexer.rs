@@ -39,7 +39,7 @@ impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
     }
 
     pub(crate) fn matches(&self, tokens: TokenSet) -> bool {
-        tokens.contains(self.kind())
+        self.current_kind.is_some_and(|kind| tokens.contains(kind))
     }
 
     /// Yields a token from the stream while also making sure the token afterwards matches `expect`.
