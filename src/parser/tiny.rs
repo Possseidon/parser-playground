@@ -166,23 +166,19 @@ pub(crate) trait TinyParse: TinyParseImpl {
 
 impl<T: TinyParseImpl> TinyParse for T {}
 
-// TODO: Fix comments regarding dynamic
-
 /// A stack of tokens which might be optionals or repetitions.
-///
-/// Only stores strings for dynamic tokens such as identifiers, strings, etc...
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TinyTokenStack {
-    /// Excludes empty strings, which are instead indicated as `false` in [Self::dynamic].
-    pub(crate) dynamic_tokens: Vec<SmolStr>,
-    /// Pushed for optional elements.
+    /// A stack of all dynamic tokens such as identifiers.
+    dynamic_tokens: Vec<SmolStr>,
+    /// Pushed for optional elements; `true` meaning `Some` and `false` meaning `None`.
     ///
-    /// If and only if `true` is pushed, there is also a matching entry in [`Self::dynamic`].
-    pub(crate) optional: BitVec,
-    /// Contains the counts of repeating fixed tokens.
-    pub(crate) fixed_repetitions: SmallVec<[usize; 2]>,
-    /// Contains the start indices of a list of dynamic tokens.
-    pub(crate) dynamic_repetitions: SmallVec<[usize; 2]>,
+    /// For existing dynamic tokens, there will be a matching entry in [`Self::dynamic_tokens`].
+    optionals: BitVec,
+    /// Contains the counts of a fixed token repetition.
+    fixed_repetitions: SmallVec<[usize; 2]>,
+    /// Contains the start index into [`Self::dynamic_tokens`] of a list of dynamic tokens.
+    dynamic_repetitions: SmallVec<[usize; 2]>,
 }
 
 impl TinyTokenStack {
@@ -195,59 +191,52 @@ impl TinyTokenStack {
     /// end of parsing.
     pub(crate) fn finish(self) -> bool {
         self.dynamic_tokens.is_empty()
-            && self.optional.is_empty()
+            && self.optionals.is_empty()
             && self.fixed_repetitions.is_empty()
             && self.dynamic_repetitions.is_empty()
     }
 
-    /// Pushes a dynamic token like an identifier, string, etc...
-    ///
-    /// Must not be called for fixed tokens such as keywords or punctuation.
+    /// Pushes a dynamic token like an identifier.
     pub(crate) fn push_dynamic(&mut self, token: SmolStr) {
         self.dynamic_tokens.push(token);
     }
 
-    /// Pops a dynamic token like an identifier, string, etc...
-    ///
-    /// Must not be called for fixed tokens such as keywords or punctuation.
+    /// Pops a dynamic token like an identifier.
     pub(crate) fn pop_dynamic(&mut self) -> SmolStr {
         self.dynamic_tokens
             .pop()
             .expect("token stack should not be empty")
     }
 
-    /// Pushes an optional token that exists.
+    /// Pushes an optional dynamic token that exists.
     pub(crate) fn push_dynamic_some(&mut self, token: SmolStr) {
         self.push_fixed_some();
         self.push_dynamic(token);
     }
 
-    /// Pushes a flag indicating an optional token that exists.
+    /// Pushes a flag indicating a fixed optional token that exists.
     pub(crate) fn push_fixed_some(&mut self) {
-        self.optional.push(true);
+        self.optionals.push(true);
     }
 
     /// Pushes a flag indicating an optional token that does not exist.
-    ///
-    /// Must not be accompanied by a call to [`Self::push_dynamic()`].
     pub(crate) fn push_none(&mut self) {
-        self.optional.push(false);
+        self.optionals.push(false);
     }
 
-    /// Pops a single optional flag.
-    ///
-    /// If `true`, for dynamic tokens, must be followed by a call to [`Self::pop_dynamic()`].
-    pub(crate) fn pop_fixed_optional(&mut self) -> bool {
-        self.optional
-            .pop()
-            .expect("optional stack should not be empty")
-    }
-
+    /// Pops an optional dynamic token.
     pub(crate) fn pop_dynamic_optional(&mut self) -> Option<SmolStr> {
         self.pop_fixed_optional().then(|| self.pop_dynamic())
     }
 
-    /// Marks the start of a new repetition.
+    /// Pops an optional fixed token.
+    pub(crate) fn pop_fixed_optional(&mut self) -> bool {
+        self.optionals
+            .pop()
+            .expect("optional stack should not be empty")
+    }
+
+    /// Marks the start of a new repetition of dynamic tokens.
     pub(crate) fn start_dynamic_repetition(&mut self) {
         self.dynamic_repetitions.push(self.dynamic_tokens.len());
     }
@@ -266,7 +255,7 @@ impl TinyTokenStack {
         self.fixed_repetitions.push(count);
     }
 
-    /// Pops the number of fixed tokens that are repeating.
+    /// Pops the number of repeating fixed tokens.
     pub(crate) fn pop_fixed_repetition(&mut self) -> usize {
         self.fixed_repetitions
             .pop()
