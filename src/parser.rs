@@ -16,16 +16,6 @@ use crate::{
 
 use self::tiny::{TinyParseImpl, TinyParseState};
 
-/// A [`NestedTokenSet`] containing the expected initial tokens for a given token or node.
-macro_rules! expected_tokens {
-    ( [ $Token:ident $( $mode:tt )? ] ) => {
-        NestedTokenSet::from_kind(TokenKind::$Token)
-    };
-    ( ( $Node:ident $( $mode:tt )? ) ) => {
-        $Node::<Tiny>::EXPECTED_TOKENS
-    };
-}
-
 /// Recursively parses a node.
 macro_rules! tiny_parse_node {
     ( $Node:ident $token_stream:ident $expect:tt ) => {
@@ -33,12 +23,12 @@ macro_rules! tiny_parse_node {
     };
 }
 
-/// Recursively parses a repetition of tokens or nodes.
-macro_rules! tiny_parse_repetition {
-    ( $tiny_parse_token_or_node:ident $Vec:ident $TokenOrNode:ident $token_stream:ident $matches:tt $expect:tt ) => { {
+/// Recursively parses a repetition of nodes.
+macro_rules! tiny_parse_node_repetition {
+    ( $Vec:ident $Node:ident $token_stream:ident $expect:tt ) => { {
         let mut result = $Vec::new();
-        while $token_stream.matches($matches) {
-            result.push($tiny_parse_token_or_node!($TokenOrNode $token_stream $expect));
+        while $token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
+            result.push(tiny_parse_node!($Node $token_stream $expect));
         }
         result
     } };
@@ -46,39 +36,42 @@ macro_rules! tiny_parse_repetition {
 
 /// Recursively parses a single field of a concatenation.
 macro_rules! tiny_parse_by_mode {
-    ( [$Token:ident] $token_stream:ident match $matches:tt $expect:tt ) => {
+    ( [$Token:ident] $token_stream:ident $expect:tt ) => {
         tokens::$Token::parse_required($token_stream, $expect)?
     };
-    ( ($Node:ident) $token_stream:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node!($Node $token_stream $expect)
-    };
-    ( [$Token:ident?] $token_stream:ident match $matches:tt $expect:tt ) => {
+    ( [$Token:ident?] $token_stream:ident $expect:tt ) => {
         tokens::$Token::parse_optional($token_stream, $expect)?
     };
-    ( ($Node:ident?) $token_stream:ident match $matches:tt $expect:tt ) => {
-        if $token_stream.matches($matches) { Some(tiny_parse_node!($Node $token_stream $expect)) } else { None }
-    };
-    ( ($Node:ident[?]) $token_stream:ident match $matches:tt $expect:tt ) => {
-        if $token_stream.matches($matches) { Some(Box::new(tiny_parse_node!($Node $token_stream $expect))) } else { None }
-    };
-    ( [$Token:ident*] $token_stream:ident match $matches:tt $expect:tt ) => {
+    ( [$Token:ident*] $token_stream:ident $expect:tt ) => {
         tokens::$Token::parse_repetition($token_stream, $expect)?
     };
-    ( ($Node:ident*) $token_stream:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_repetition!(tiny_parse_node SmallVec $Node $token_stream $matches $expect)
+    ( ($Node:ident) $token_stream:ident $expect:tt ) => {
+        tiny_parse_node!($Node $token_stream $expect)
     };
-    ( ($Node:ident[*]) $token_stream:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_repetition!(tiny_parse_node Vec $Node $token_stream $matches $expect)
+    ( ($Node:ident[]) $token_stream:ident $expect:tt ) => {
+        Box::new(tiny_parse_node!($Node $token_stream $expect))
+    };
+    ( ($Node:ident?) $token_stream:ident $expect:tt ) => {
+        if $token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(tiny_parse_node!($Node $token_stream $expect)) } else { None }
+    };
+    ( ($Node:ident[?]) $token_stream:ident $expect:tt ) => {
+        if $token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(Box::new(tiny_parse_node!($Node $token_stream $expect))) } else { None }
+    };
+    ( ($Node:ident*) $token_stream:ident $expect:tt ) => {
+        tiny_parse_node_repetition!(SmallVec $Node $token_stream $expect)
+    };
+    ( ($Node:ident[*]) $token_stream:ident $expect:tt ) => {
+        tiny_parse_node_repetition!(Vec $Node $token_stream $expect)
     };
 }
 
 /// Iteratively parses a repetition of tokens or nodes.
 macro_rules! tiny_parse_node_repetition_iterative {
-    ( $Node:ident $state:ident $original_expect:ident $field:ident $repetition:ident $matches:tt $expect:tt ) => { paste! {
+    ( $Node:ident $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => { paste! {
         if !$repetition {
             NodeStack::<Tiny>::start_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]);
         }
-        if $state.token_stream.matches($matches) {
+        if $state.token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
             $state.push_repetition::<Self>($original_expect, $field);
             $state.push_parser::<$Node<Tiny>>($expect);
         }
@@ -87,39 +80,39 @@ macro_rules! tiny_parse_node_repetition_iterative {
 
 /// Iteratively parses a single field of a concatenation.
 macro_rules! tiny_parse_by_mode_iterative {
-    ( [$Token:ident] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+    ( [$Token:ident] $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => { paste! {
         tokens::$Token::tiny_push_required($state, $expect)?;
     } };
-    ( ($Node:ident) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        $state.push_parser::<$Node<Tiny>>($expect);
-    };
-    ( [$Token:ident?] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+    ( [$Token:ident?] $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => { paste! {
         tokens::$Token::tiny_push_optional($state, $expect)?;
     } };
-    ( ($Node:ident?) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        if $state.token_stream.matches($matches) {
-            $state.nodes.push_some();
-            $state.push_parser::<$Node<Tiny>>($expect);
-        } else {
-            $state.nodes.push_none();
-        }
-    };
-    ( ($Node:ident[?]) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        if $state.token_stream.matches($matches) {
-            $state.nodes.push_some();
-            $state.push_parser::<$Node<Tiny>>($expect);
-        } else {
-            $state.nodes.push_none();
-        }
-    };
-    ( [$Token:ident*] $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => { paste! {
+    ( [$Token:ident*] $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => { paste! {
         tokens::$Token::tiny_push_repetition($state, $expect)?;
     } };
-    ( ($Node:ident*) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node_repetition_iterative!($Node $state $original_expect $field $repetition $matches $expect)
+    ( ($Node:ident $( [] )? ) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
+        $state.push_parser::<$Node<Tiny>>($expect);
     };
-    ( ($Node:ident[*]) $state:ident $original_expect:ident $field:ident $repetition:ident match $matches:tt $expect:tt ) => {
-        tiny_parse_node_repetition_iterative!($Node $state $original_expect $field $repetition $matches $expect)
+    ( ($Node:ident?) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
+        if $state.token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
+            $state.nodes.push_some();
+            $state.push_parser::<$Node<Tiny>>($expect);
+        } else {
+            $state.nodes.push_none();
+        }
+    };
+    ( ($Node:ident[?]) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
+        if $state.token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
+            $state.nodes.push_some();
+            $state.push_parser::<$Node<Tiny>>($expect);
+        } else {
+            $state.nodes.push_none();
+        }
+    };
+    ( ($Node:ident*) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
+        tiny_parse_node_repetition_iterative!($Node $state $original_expect $field $repetition $expect)
+    };
+    ( ($Node:ident[*]) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
+        tiny_parse_node_repetition_iterative!($Node $state $original_expect $field $repetition $expect)
     };
 }
 
@@ -156,10 +149,13 @@ macro_rules! expect_field {
     ( [$Token:ident] $Name:ident $field:ident $expect:ident ) => {
         expect_next_field!($Name $field $expect)
     };
-    ( ($Node:ident) $Name:ident $field:ident $expect:ident ) => {
+    ( [$Token:ident?] $Name:ident $field:ident $expect:ident ) => {
         expect_next_field!($Name $field $expect)
     };
-    ( [$Token:ident?] $Name:ident $field:ident $expect:ident ) => {
+    ( [$Token:ident*] $Name:ident $field:ident $expect:ident ) => {
+        expect_same_field!($Name $field $expect)
+    };
+    ( ($Node:ident $( [] )? ) $Name:ident $field:ident $expect:ident ) => {
         expect_next_field!($Name $field $expect)
     };
     ( ($Node:ident?) $Name:ident $field:ident $expect:ident ) => {
@@ -167,9 +163,6 @@ macro_rules! expect_field {
     };
     ( ($Node:ident[?]) $Name:ident $field:ident $expect:ident ) => {
         expect_next_field!($Name $field $expect)
-    };
-    ( [$Token:ident*] $Name:ident $field:ident $expect:ident ) => {
-        expect_same_field!($Name $field $expect)
     };
     ( ($Node:ident*) $Name:ident $field:ident $expect:ident ) => {
         expect_same_field!($Name $field $expect)
@@ -212,7 +205,7 @@ macro_rules! until_required {
     ( $tokens:ident [$Token:ident] $( $rest:tt )* ) => { { xor_token!($tokens $Token); $tokens } };
     ( $tokens:ident [$Token:ident?] $( $rest:tt)* ) => { { xor_token!($tokens $Token); until_required!( $tokens $( $rest )* ) } };
     ( $tokens:ident [$Token:ident*] $( $rest:tt )* ) => { { xor_token!($tokens $Token); until_required!( $tokens $( $rest )* ) } };
-    ( $tokens:ident ($Node:ident) $( $rest:tt )* ) => { { xor_node!($tokens $Node); $tokens } };
+    ( $tokens:ident ($Node:ident $( [] )? ) $( $rest:tt )* ) => { { xor_node!($tokens $Node); $tokens } };
     ( $tokens:ident ($Node:ident?) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
     ( $tokens:ident ($Node:ident[?]) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
     ( $tokens:ident ($Node:ident*) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
@@ -225,9 +218,7 @@ macro_rules! field_type {
     ( [$Token:ident?] ) => { <tokens::$Token as TokenStorage<S>>::Optional };
     ( [$Token:ident*] ) => { <tokens::$Token as TokenStorage<S>>::Repetition };
     ( ($Node:ident) ) => { $Node<S> };
-    // While maybe useful, forbidding Box for unconditional nodes prevents unparsable grammars.
-    // However, I think, it is almost always better to box an optional node instead anyway.
-    // ( ($Node:ident[]) ) => { Box<$Node<S>> };
+    ( ($Node:ident[]) ) => { Box<$Node<S>> };
     ( ($Node:ident?) ) => { Option<$Node<S>> };
     ( ($Node:ident[?]) ) => { Option<Box<$Node<S>>> };
     ( ($Node:ident*) ) => { SmallVec<[$Node<S>; 1]> };
@@ -239,21 +230,24 @@ macro_rules! pop_field {
     ( [$Token:ident] $state:ident ) => {
         tokens::$Token::tiny_pop_required($state)
     };
-    ( ($Node:ident) $state:ident ) => { paste! {
-        NodeStack::<Tiny>::pop(&mut $state.nodes.[<$Node:snake>])
-    } };
     ( [$Token:ident?] $state:ident ) => {
         tokens::$Token::tiny_pop_optional($state)
     };
+    ( [$Token:ident*] $state:ident ) => {{
+        tokens::$Token::tiny_pop_repetition($state)
+    }};
+    ( ($Node:ident) $state:ident ) => { paste! {
+        NodeStack::<Tiny>::pop(&mut $state.nodes.[<$Node:snake>])
+    } };
+    ( ($Node:ident[]) $state:ident ) => { paste! {
+        Box::new(NodeStack::<Tiny>::pop(&mut $state.nodes.[<$Node:snake>]))
+    } };
     ( ($Node:ident?) $state:ident ) => { paste! {
         NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>])
     } };
     ( ($Node:ident[?]) $state:ident ) => { paste! {
         NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>]).map(Box::new)
     } };
-    ( [$Token:ident*] $state:ident ) => {{
-        tokens::$Token::tiny_pop_repetition($state)
-    }};
     ( ($Node:ident*) $state:ident ) => { paste! {
         SmallVec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
     } };
@@ -276,12 +270,13 @@ macro_rules! impl_pop_final_node {
 /// Drains nested nodes of a single field into the given [`DroppedNodes`].
 macro_rules! drain_field_into_dropped_nodes {
     ( [$Token:ident] $nodes:ident $self:ident $field:ident ) => {};
-    ( ($Node:ident) $nodes:ident $self:ident $field:ident ) => {
+    ( [$Token:ident?] $nodes:ident $self:ident $field:ident ) => {};
+    ( [$Token:ident*] $nodes:ident $self:ident $field:ident ) => {};
+    ( ($Node:ident $( [] )? ) $nodes:ident $self:ident $field:ident ) => {
         paste! {
             $self.$field.drain_into_dropped_nodes($nodes);
         }
     };
-    ( [$Token:ident?] $nodes:ident $self:ident $field:ident ) => {};
     ( ($Node:ident?) $nodes:ident $self:ident $field:ident ) => {
         paste! {
             $self.$field.as_mut().map(|node| node.drain_into_dropped_nodes($nodes));
@@ -292,7 +287,6 @@ macro_rules! drain_field_into_dropped_nodes {
             $nodes.[<$Node:snake>].extend($self.$field.take().map(|node| *node));
         }
     };
-    ( [$Token:ident*] $nodes:ident $self:ident $field:ident ) => {};
     ( ($Node:ident*) $nodes:ident $self:ident $field:ident ) => {
         paste! {
             $nodes.[<$Node:snake>].extend($self.$field.drain(..));
@@ -333,15 +327,15 @@ macro_rules! ensure_no_recursive_node_repetition {
 
 /// Pastes the statement only if the field is a node and not a token.
 macro_rules! if_node {
-    ( ($Node:ident $( $kind:tt )? ) $stmt:tt ) => {
+    ( ($Node:ident $( $mode:tt )? ) $stmt:tt ) => {
         $stmt
     };
-    ( [$Token:ident $( $kind:tt )? ] $stmt:tt ) => {};
+    ( [$Token:ident $( $mode:tt )? ] $stmt:tt ) => {};
 }
 
 /// Accesses a field within a [`NodeSet`].
 macro_rules! nodes_dot_field {
-    ( $nodes:ident ($Field:ident $( $kind:tt )? ) ) => {
+    ( $nodes:ident ($Field:ident $( $mode:tt )? ) ) => {
         paste! {
             $nodes.[<$Field:snake>]
         }
@@ -384,7 +378,7 @@ macro_rules! impl_struct_parse {
 
         /// A concatenation node within a grammar.
         pub(crate) struct $Name<S: Style> {
-           $( $field: field_type!($Field), )*
+           $( pub(crate) $field: field_type!($Field), )*
         }
 
         impl<S: Style> Clone for $Name<S> {
@@ -412,11 +406,6 @@ macro_rules! impl_struct_parse {
         impl<S: Style> Eq for $Name<S> {}
 
         impl<S: Style> $Name<S> {
-            /// Expected tokens for *only* the given field, even if it is not required.
-            const EXPECTED_TOKENS_AT: EnumMap<[<$Name:snake>]::Field, TokenSet> = EnumMap::from_array([
-                $( expected_tokens!($Field).tokens, )*
-            ]);
-
             /// Expected tokens for a given field, including everything up until and including the next required field.
             const EXPECTED_TOKENS_FROM: EnumMap<[<$Name:snake>]::Field, NestedTokenSet> = EnumMap::from_array({
                 let array = PushArray([]);
@@ -443,7 +432,6 @@ macro_rules! impl_struct_parse {
             }
         }
 
-        const _: EnumMap<[<$Name:snake>]::Field, TokenSet> = $Name::<Tiny>::EXPECTED_TOKENS_AT;
         const _: EnumMap<[<$Name:snake>]::Field, NestedTokenSet> = $Name::<Tiny>::EXPECTED_TOKENS_FROM;
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
         const _: () = { $( ensure_no_recursive_node_repetition!($Name $Field $field); )* };
@@ -459,9 +447,7 @@ macro_rules! impl_struct_parse {
 
             fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<Self> {
                 Some(Self { $( $field: {
-                    tiny_parse_by_mode!($Field token_stream match {
-                        Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
-                    } { expect_field!($Field $Name $field expect) })
+                    tiny_parse_by_mode!($Field token_stream { expect_field!($Field $Name $field expect) })
                 }, )* })
             }
 
@@ -483,9 +469,7 @@ macro_rules! impl_struct_parse {
                     state.push_next_field::<Self>(expect, field);
                 }
                 match [<$Name:snake>]::Field::from_usize(field) { $( [<$Name:snake>]::Field::[<$field:camel>] => {
-                    tiny_parse_by_mode_iterative!($Field state expect field repetition match {
-                        Self::EXPECTED_TOKENS_AT[[<$Name:snake>]::Field::[<$field:camel>]]
-                    } { expect_field!($Field $Name $field expect) });
+                    tiny_parse_by_mode_iterative!($Field state expect field repetition { expect_field!($Field $Name $field expect) });
                 } )* }
                 Some(())
             }
@@ -502,19 +486,65 @@ macro_rules! impl_struct_parse {
     } };
 }
 
+/// The type of a node variant.
+macro_rules! node_variant_type {
+    ( $Node:ident ) => { $Node<S> };
+    ( $Node:ident[] ) => { Box<$Node<S>> };
+}
+
+/// Wraps a node variant in a box if necessary.
+macro_rules! box_variant_if {
+    ( $node:tt ) => {
+        $node
+    };
+    ( $node:tt [] ) => {
+        Box::new($node)
+    };
+}
+
 /// Implements an alternation node.
 ///
 /// Variants can be both tokens and nodes.
 macro_rules! impl_enum_parse {
     ( $Name:ident {
         $( [$Token:ident], )*
-        $( ($Node:ident), )*
+        $( ($Node:ident $( $mode:tt )? ), )*
     } ) => { paste! {
-        #[derive(Clone, Debug, PartialEq, Eq)]
         pub(crate) enum $Name<S: Style> {
             $( $Token(<tokens::$Token as TokenStorage<S>>::Required), )*
-            $( $Node($Node<S>), )*
+            $( $Node(node_variant_type!($Node $( $mode )? )), )*
         }
+
+        impl<S: Style> Clone for $Name<S> {
+            fn clone(&self) -> Self {
+                match self {
+                    $( Self::$Node(node) => Self::$Node(node.clone()), )*
+                    $( Self::$Token(token) => Self::$Token(token.clone()), )*
+                }
+            }
+        }
+
+        impl<S: Style> fmt::Debug for $Name<S> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    $( Self::$Node(node) => f.debug_tuple(stringify!($Node)).field(node).finish(), )*
+                    $( Self::$Token(_) => write!(f, stringify!($Token)), )*
+                }
+            }
+        }
+
+        impl<S: Style> PartialEq for $Name<S> {
+            fn eq(&self, other: &Self) -> bool {
+                #[allow(unreachable_patterns)]
+                match (self, other) {
+                    $( (Self::$Node(node), Self::$Node(other)) => node.eq(other), )*
+                    $( (Self::$Token(token), Self::$Token(other)) => token.eq(other), )*
+                    _ => false,
+                }
+            }
+        }
+
+        impl<S: Style> Eq for $Name<S> {}
 
         impl<S: Style> $Name<S> {
             /// The last required field as well as everything after.
@@ -551,7 +581,7 @@ macro_rules! impl_enum_parse {
                 } )*
 
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    return Some(Self::$Node($Node::<Tiny>::tiny_parse_nested(token_stream, expect)?));
+                    return Some(Self::$Node(box_variant_if!({$Node::<Tiny>::tiny_parse_nested(token_stream, expect)?} $( $mode )? )));
                 } )*
 
                 unreachable!("token should match one of the above cases");
@@ -563,9 +593,12 @@ macro_rules! impl_enum_parse {
                 field: usize,
                 _repetition: bool,
             ) -> Option<()> {
+                // token-only alternations never call a build-step, leading to some unreachable code
+                #[allow(unreachable_code)]
                 if field == 1 {
+                    #[allow(unused_variables)]
                     let node = match state.nodes.pop_kind() {
-                        $( NodeKind::$Node => Self::$Node(NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>])), )*
+                        $( NodeKind::$Node => Self::$Node(box_variant_if!({ NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>]) } $( $mode )? )), )*
                         _ => unreachable!("node should match one of the above cases"),
                     };
                     state.nodes.[<$Name:snake>].push(node);
@@ -609,9 +642,9 @@ macro_rules! impl_node_parse {
         /// Storage is optimized to be very compact, but care has to be taken, that matching
         /// functions are called in the right order.
         #[derive(Clone, Debug, PartialEq, Eq)]
-        struct NodeStack<S: Style> {
+        pub(crate) struct NodeStack<S: Style> {
             $( [<$Name:snake>]: Vec<$Name<S>>, )*
-            _kinds: Kinds,
+            _kinds: NodeKinds,
             _optional: BitVec,
             _repetition: Repetition,
         }
@@ -621,7 +654,7 @@ macro_rules! impl_node_parse {
             fn new() -> Self {
                 Self {
                     $( [<$Name:snake>]: Vec::new(), )*
-                    _kinds: Kinds::new(),
+                    _kinds: NodeKinds::new(),
                     _optional: BitVec::new(),
                     _repetition: Repetition::new(),
                 }
@@ -746,8 +779,8 @@ macro_rules! impl_node_parse {
 }
 
 /// A list of [`NodeKind`]s.
-type Kinds = SmallVec<[NodeKind; 16]>;
-const _: () = assert!(std::mem::size_of::<Kinds>() <= 24);
+type NodeKinds = SmallVec<[NodeKind; 16]>;
+const _: () = assert!(std::mem::size_of::<NodeKinds>() <= 24);
 
 /// A list of repetition-end markers.
 type Repetition = SmallVec<[usize; 2]>;
