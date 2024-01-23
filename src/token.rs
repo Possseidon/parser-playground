@@ -526,7 +526,7 @@ impl NestedTokenSet {
             }
         } else {
             Expect {
-                tokens: self.tokens.xor_without_ambiguity(self.tokens),
+                tokens: expect.tokens.xor_without_ambiguity(self.tokens),
                 or_end_of_input: expect.or_end_of_input,
             }
         }
