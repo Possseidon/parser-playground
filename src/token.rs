@@ -142,7 +142,6 @@ macro_rules! impl_token_kind {
                         Some(result)
                     }
 
-
                     pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
                         state.tokens.push_dynamic(state.token_stream.next(expect)?);
                         Some(())
@@ -218,6 +217,7 @@ macro_rules! impl_fixed_token_kind {
             }
 
             pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                state.token_stream.next(expect)?;
                 Some(())
             }
 
