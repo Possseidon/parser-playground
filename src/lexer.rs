@@ -7,6 +7,7 @@ use smol_str::SmolStr;
 
 use crate::token::{Expect, FixedTokenKind, TokenKind, TokenSet};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TinyLexerToken {
     pub(crate) kind: TokenKind,
     pub(crate) text: SmolStr,
@@ -207,7 +208,7 @@ impl<'code> TinyLexer<'code> {
                     if self.code[self.pos + 1..].starts_with("//") {
                         break Some(Some(()));
                     } else if self.code[self.pos + 1..].starts_with('/') {
-                        self.pos = 2 + find_line_break(&self.code[self.pos + 2..]);
+                        self.pos += 2 + find_line_break(&self.code[self.pos + 2..]);
                     } else if self.code[self.pos + 1..].starts_with('*') {
                         let start_len = self.code[self.pos..].len();
                         let mut after_block_comment = &self.code[self.pos + 2..];
