@@ -15,6 +15,17 @@ use crate::{
     token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenSet, TokenStorage},
 };
 
+pub(crate) trait ParseImpl {
+    /// Which tokens are initially expected as a [`NestedTokenSet`].
+    const EXPECTED_TOKENS: NestedTokenSet;
+
+    /// Which tokens are initially expected as an [`Expect`].
+    const INITIAL_EXPECT: Expect = Expect {
+        tokens: Self::EXPECTED_TOKENS.tokens,
+        or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
+    };
+}
+
 /// Recursively parses a node.
 macro_rules! tiny_parse_node {
     ( $Node:ident $token_stream:ident $expect:tt ) => {
@@ -435,7 +446,7 @@ macro_rules! impl_struct_parse {
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
         const _: () = { $( ensure_no_recursive_node_repetition!($Name $Field $field); )* };
 
-        impl TinyParseImpl for $Name<Tiny> {
+        impl ParseImpl for $Name<Tiny> {
             /// Shorthand for the first entry in `EXPECTED_TOKENS_FROM`.
             ///
             /// Implemented in a way that does not introduce cycle compiler errors.
@@ -443,7 +454,9 @@ macro_rules! impl_struct_parse {
                 let tokens = NestedTokenSet::new();
                 until_required!(tokens $( $Field )* )
             };
+        }
 
+        impl TinyParseImpl for $Name<Tiny> {
             fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<Self> {
                 Ok(Self { $( $field: {
                     tiny_parse_by_mode!($Field token_stream { expect_field!($Field $Name $field expect) })
@@ -565,13 +578,15 @@ macro_rules! impl_enum_parse {
 
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
 
-        impl TinyParseImpl for $Name<Tiny> {
+        impl ParseImpl for $Name<Tiny> {
             const EXPECTED_TOKENS: NestedTokenSet = {
                 NestedTokenSet::new()
                     $( .xor_without_ambiguity_const(NestedTokenSet::from_kind(TokenKind::$Token)) )*
                     $( .xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS) )*
             };
+        }
 
+        impl TinyParseImpl for $Name<Tiny> {
             fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<Self> {
                 let found = token_stream.kind();
 

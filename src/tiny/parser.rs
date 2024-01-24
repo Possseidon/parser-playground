@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::{
-    parser::NodeStack,
+    parser::{NodeStack, ParseImpl},
     tiny::lexer::{CheckedTinyTokenStream, TinyTokenStream},
     token::{Expect, NestedTokenSet, Tiny},
 };
@@ -95,16 +95,7 @@ impl<T: TinyTokenStream> TinyParseState<T> {
 }
 
 /// Implementation detail for [`TinyParse`].
-pub(crate) trait TinyParseImpl: Sized {
-    /// Which tokens are initially expected as a [`NestedTokenSet`].
-    const EXPECTED_TOKENS: NestedTokenSet;
-
-    /// Which tokens are initially expected as an [`Expect`].
-    const INITIAL_EXPECT: Expect = Expect {
-        tokens: Self::EXPECTED_TOKENS.tokens,
-        or_end_of_input: !Self::EXPECTED_TOKENS.exhaustive,
-    };
-
+pub(crate) trait TinyParseImpl: ParseImpl + Sized {
     /// Used by [`TinyParse::tiny_parse_fast()`].
     fn tiny_parse_nested(
         token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>,
@@ -124,7 +115,6 @@ pub(crate) trait TinyParseImpl: Sized {
 }
 
 /// Allows parsing both fast (recursively; might stack overflow) and safe (iteratively).
-#[allow(private_bounds)]
 pub(crate) trait TinyParse: TinyParseImpl {
     /// Parses recursively.
     ///
