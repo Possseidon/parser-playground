@@ -106,8 +106,11 @@ macro_rules! impl_token_kind {
 
         pub(crate) mod tokens {
             use crate::{
-                lexer::{TinyTokenStream, CheckedTinyTokenStream},
-                parser::tiny::TinyParseState,
+                tiny::{
+                    TinyResult,
+                    lexer::{TinyTokenStream, CheckedTinyTokenStream},
+                    parser::TinyParseState,
+                },
             };
 
             use super::{Expect, Style, TokenStorage, Tiny, TokenKind, TokenSet};
@@ -122,54 +125,54 @@ macro_rules! impl_token_kind {
                 }
 
                 impl $Dynamic {
-                    pub(crate) fn parse_required(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Required> {
+                    pub(crate) fn parse_required(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Required> {
                         token_stream.next(expect)
                     }
 
-                    pub(crate) fn parse_optional(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Optional> {
-                        Some(if token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
+                    pub(crate) fn parse_optional(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Optional> {
+                        Ok(if token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
                             Some(token_stream.next(expect)?)
                         } else {
                             None
                         })
                     }
 
-                    pub(crate) fn parse_repetition(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Repetition> {
+                    pub(crate) fn parse_repetition(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Repetition> {
                         let mut result = <Self as TokenStorage<Tiny>>::Repetition::new();
                         while token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
                             result.push(token_stream.next(expect)?);
                         }
-                        Some(result)
+                        Ok(result)
                     }
 
-                    pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                    pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> TinyResult<()> {
                         state.tokens.push_dynamic(state.token_stream.next(expect)?);
-                        Some(())
+                        Ok(())
                     }
 
                     pub(crate) fn tiny_pop_required(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Required {
                         state.tokens.pop_dynamic()
                     }
 
-                    pub(crate) fn tiny_push_optional(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                    pub(crate) fn tiny_push_optional(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> TinyResult<()> {
                         if state.token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
                             state.tokens.push_dynamic_some(state.token_stream.next(expect)?);
                         } else {
                             state.tokens.push_none();
                         }
-                        Some(())
+                        Ok(())
                     }
 
                     pub(crate) fn tiny_pop_optional(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Optional {
                         state.tokens.pop_dynamic_optional()
                     }
 
-                    pub(crate) fn tiny_push_repetition(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+                    pub(crate) fn tiny_push_repetition(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> TinyResult<()> {
                         state.tokens.start_dynamic_repetition();
                         while state.token_stream.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
                             state.tokens.push_dynamic(state.token_stream.next(expect)?);
                         }
-                        Some(())
+                        Ok(())
                     }
 
                     pub(crate) fn tiny_pop_repetition(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Repetition {
@@ -194,57 +197,57 @@ macro_rules! impl_fixed_token_kind {
         }
 
         impl $Kind {
-            pub(crate) fn parse_required(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Required> {
+            pub(crate) fn parse_required(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Required> {
                 token_stream.next(expect)?;
-                Some(())
+                Ok(())
             }
 
-            pub(crate) fn parse_optional(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Optional> {
+            pub(crate) fn parse_optional(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Optional> {
                 let result = token_stream.matches(TokenSet::from_kind(TokenKind::$Kind));
                 if result {
                     token_stream.next(expect)?;
                 }
-                Some(result)
+                Ok(result)
             }
 
-            pub(crate) fn parse_repetition(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<<Self as TokenStorage<Tiny>>::Repetition> {
+            pub(crate) fn parse_repetition(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Repetition> {
                 let mut count = 0;
                 while token_stream.matches(TokenSet::from_kind(TokenKind::$Kind)) {
                     token_stream.next(expect)?;
                     count += 1;
                 }
-                Some(count)
+                Ok(count)
             }
 
-            pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+            pub(crate) fn tiny_push_required(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> TinyResult<()> {
                 state.token_stream.next(expect)?;
-                Some(())
+                Ok(())
             }
 
             pub(crate) fn tiny_pop_required(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Required {}
 
-            pub(crate) fn tiny_push_optional(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+            pub(crate) fn tiny_push_optional(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> TinyResult<()> {
                 if state.token_stream.matches(TokenSet::from_kind(TokenKind::$Kind)) {
                     state.token_stream.next(expect)?;
                     state.tokens.push_fixed_some();
                 } else {
                     state.tokens.push_none();
                 }
-                Some(())
+                Ok(())
             }
 
             pub(crate) fn tiny_pop_optional(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Optional {
                 state.tokens.pop_fixed_optional()
             }
 
-            pub(crate) fn tiny_push_repetition(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> Option<()> {
+            pub(crate) fn tiny_push_repetition(state: &mut TinyParseState<impl TinyTokenStream>, expect: Expect) -> TinyResult<()> {
                 let mut count = 0;
                 while state.token_stream.matches(TokenSet::from_kind(TokenKind::$Kind)) {
                     state.token_stream.next(expect)?;
                     count += 1;
                 }
                 state.tokens.push_fixed_repetition(count);
-                Some(())
+                Ok(())
             }
 
             pub(crate) fn tiny_pop_repetition(state: &mut TinyParseState<impl TinyTokenStream>) -> <Self as TokenStorage<Tiny>>::Repetition {

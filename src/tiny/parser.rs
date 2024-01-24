@@ -3,11 +3,12 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::{
-    lexer::{CheckedTinyTokenStream, TinyTokenStream},
+    parser::NodeStack,
+    tiny::lexer::{CheckedTinyTokenStream, TinyTokenStream},
     token::{Expect, NestedTokenSet, Tiny},
 };
 
-use super::NodeStack;
+use super::TinyResult;
 
 /// A single iterative parsing step.
 #[derive(Clone, Copy, Debug)]
@@ -17,7 +18,7 @@ pub(crate) struct TinyParseFn<T: TinyTokenStream> {
         expect: Expect,
         field: usize,
         repetition: bool,
-    ) -> Option<()>,
+    ) -> TinyResult<()>,
     pub(crate) expect: Expect,
     pub(crate) field: usize,
     pub(crate) repetition: bool,
@@ -25,7 +26,7 @@ pub(crate) struct TinyParseFn<T: TinyTokenStream> {
 
 impl<T: TinyTokenStream> TinyParseFn<T> {
     /// Calls the `parse` function.
-    pub(crate) fn parse(self, state: &mut TinyParseState<T>) -> Option<()> {
+    pub(crate) fn parse(self, state: &mut TinyParseState<T>) -> TinyResult<()> {
         (self.parse)(state, self.expect, self.field, self.repetition)
     }
 }
@@ -108,7 +109,7 @@ pub(crate) trait TinyParseImpl: Sized {
     fn tiny_parse_nested(
         token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>,
         expect: Expect,
-    ) -> Option<Self>;
+    ) -> TinyResult<Self>;
 
     /// Used by [`TinyParse::tiny_parse_safe()`].
     fn tiny_parse_iterative(
@@ -116,7 +117,7 @@ pub(crate) trait TinyParseImpl: Sized {
         expect: Expect,
         field: usize,
         repetition: bool,
-    ) -> Option<()>;
+    ) -> TinyResult<()>;
 
     /// Used at the very end to pop the last node from the node stack.
     fn pop_final_node(nodes: &mut NodeStack<Tiny>) -> Self;
@@ -136,7 +137,7 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
     /// this again in the future, but for now I'll keep it as is.
-    fn tiny_parse_fast(token_stream: impl TinyTokenStream) -> Option<Self> {
+    fn tiny_parse_fast(token_stream: impl TinyTokenStream) -> TinyResult<Self> {
         let mut token_stream = CheckedTinyTokenStream::new(token_stream, Self::INITIAL_EXPECT)?;
         Self::tiny_parse_nested(&mut token_stream, Expect::END_OF_INPUT)
     }
@@ -148,7 +149,7 @@ pub(crate) trait TinyParse: TinyParseImpl {
     ///
     /// Furthermore, since tokens can be arbitrarily large, limit the actual input, not just the
     /// number of tokens.
-    fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> Option<Self> {
+    fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> TinyResult<Self> {
         let mut state = TinyParseState::new(CheckedTinyTokenStream::new(
             token_stream,
             Self::INITIAL_EXPECT,
@@ -160,7 +161,7 @@ pub(crate) trait TinyParse: TinyParseImpl {
         assert!(state.tokens.finish(), "leftover tokens after parsing");
         let result = Self::pop_final_node(&mut state.nodes);
         assert!(state.nodes.finish(), "leftover nodes after parsing");
-        Some(result)
+        Ok(result)
     }
 }
 

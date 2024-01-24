@@ -1,6 +1,3 @@
-pub(crate) mod positioned;
-pub(crate) mod tiny;
-
 use std::fmt;
 
 use bitvec::vec::BitVec;
@@ -9,12 +6,14 @@ use paste::paste;
 use smallvec::SmallVec;
 
 use crate::{
-    lexer::{CheckedTinyTokenStream, TinyTokenStream},
     push_array::PushArray,
+    tiny::{
+        lexer::{CheckedTinyTokenStream, TinyTokenStream},
+        parser::{TinyParseImpl, TinyParseState},
+        TinyResult,
+    },
     token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenSet, TokenStorage},
 };
-
-use self::tiny::{TinyParseImpl, TinyParseState};
 
 /// Recursively parses a node.
 macro_rules! tiny_parse_node {
@@ -445,8 +444,8 @@ macro_rules! impl_struct_parse {
                 until_required!(tokens $( $Field )* )
             };
 
-            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<Self> {
-                Some(Self { $( $field: {
+            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<Self> {
+                Ok(Self { $( $field: {
                     tiny_parse_by_mode!($Field token_stream { expect_field!($Field $Name $field expect) })
                 }, )* })
             }
@@ -456,14 +455,14 @@ macro_rules! impl_struct_parse {
                 expect: Expect,
                 field: usize,
                 repetition: bool,
-            ) -> Option<()> {
+            ) -> TinyResult<()> {
                 if field == [<$Name:snake>]::Field::LENGTH {
                     $( let $field; )*
                     reverse!( $( {
                         $field = pop_field!($Field state)
                     } )* );
                     state.nodes.[<$Name:snake>].push(Self { $( $field, )* });
-                    return Some(());
+                    return Ok(());
                 }
                 if !repetition {
                     state.push_next_field::<Self>(expect, field);
@@ -471,7 +470,7 @@ macro_rules! impl_struct_parse {
                 match [<$Name:snake>]::Field::from_usize(field) { $( [<$Name:snake>]::Field::[<$field:camel>] => {
                     tiny_parse_by_mode_iterative!($Field state expect field repetition { expect_field!($Field $Name $field expect) });
                 } )* }
-                Some(())
+                Ok(())
             }
 
             impl_pop_final_node!($Name);
@@ -573,15 +572,15 @@ macro_rules! impl_enum_parse {
                     $( .xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS) )*
             };
 
-            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> Option<Self> {
+            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<Self> {
                 let found = token_stream.kind();
 
                 $( if found == TokenKind::$Token {
-                    return Some(Self::$Token(tokens::$Token::parse_required(token_stream, expect)?));
+                    return Ok(Self::$Token(tokens::$Token::parse_required(token_stream, expect)?));
                 } )*
 
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    return Some(Self::$Node(box_variant_if!({$Node::<Tiny>::tiny_parse_nested(token_stream, expect)?} $( $mode )? )));
+                    return Ok(Self::$Node(box_variant_if!({$Node::<Tiny>::tiny_parse_nested(token_stream, expect)?} $( $mode )? )));
                 } )*
 
                 unreachable!("token should match one of the above cases");
@@ -592,7 +591,7 @@ macro_rules! impl_enum_parse {
                 expect: Expect,
                 field: usize,
                 _repetition: bool,
-            ) -> Option<()> {
+            ) -> TinyResult<()> {
                 // token-only alternations never call a build-step, leading to some unreachable code
                 #[allow(unreachable_code)]
                 if field == 1 {
@@ -602,14 +601,14 @@ macro_rules! impl_enum_parse {
                         _ => unreachable!("node should match one of the above cases"),
                     };
                     state.nodes.[<$Name:snake>].push(node);
-                    return Some(());
+                    return Ok(());
                 }
 
                 let found = state.token_stream.kind();
 
                 $( if found == TokenKind::$Token {
                     state.nodes.[<$Name:snake>].push(Self::$Token(tokens::$Token::parse_required(&mut state.token_stream, expect)?));
-                    return Some(());
+                    return Ok(());
                 } )*
 
                 state.push_build_enum::<Self>(expect);
@@ -617,7 +616,7 @@ macro_rules! impl_enum_parse {
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
                     state.nodes.push_kind(NodeKind::$Node);
                     state.push_parser::<$Node<Tiny>>(expect);
-                    return Some(());
+                    return Ok(());
                 } )*
 
                 unreachable!("token should match one of the above cases");
@@ -651,7 +650,7 @@ macro_rules! impl_node_parse {
 
         impl<S: Style> NodeStack<S> {
             /// Creates a new empty stack.
-            fn new() -> Self {
+            pub(crate) fn new() -> Self {
                 Self {
                     $( [<$Name:snake>]: Vec::new(), )*
                     _kinds: NodeKinds::new(),
@@ -662,7 +661,7 @@ macro_rules! impl_node_parse {
 
             /// Consumes `self` and returns if all fields are empty, which should always be the case
             /// at the end of parsing.
-            fn finish(self) -> bool {
+            pub(crate) fn finish(self) -> bool {
                 self._optional.is_empty()
                     && self._repetition.is_empty()
                     && $( self.[<$Name:snake>].is_empty() )&&*
