@@ -3,7 +3,10 @@ use std::mem::{replace, take};
 use smol_str::SmolStr;
 
 use crate::{
-    lexer::{find_line_break, lex_quoted, lex_raw_string},
+    lexer::{
+        lex_char_or_label, lex_doc_comment, lex_integer_or_float, lex_keyword_or_ident, lex_quoted,
+        lex_raw_string, lex_whitespace, UnterminatedBlockComment,
+    },
     token::{Expect, FixedTokenKind, TokenKind, TokenSet},
 };
 
@@ -23,166 +26,36 @@ impl<'code> TinyLexer<'code> {
     /// Yields the next token, assuming [`Self::skip_whitespace()`] was called previously.
     pub(crate) fn next_token(&mut self) -> TinyResult<TinyLexerToken> {
         let rest = &self.code[self.pos..];
-        let (kind, len, dynamic) = if let Some(after_doc_comment) = rest.strip_prefix("///") {
-            (
-                TokenKind::DocComment,
-                find_line_break(after_doc_comment) + 3,
-                true,
-            )
-        } else if let Some(after_initial_digit) = rest.strip_prefix(|c: char| c.is_ascii_digit()) {
-            if let Some(after_base) =
-                after_initial_digit.strip_prefix(['B', 'b', 'O', 'o', 'X', 'x'])
-            {
-                let end =
-                    after_base.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-                (TokenKind::Integer, rest.len() - end.len(), true)
-            } else {
-                let mut token_kind = TokenKind::Integer;
-                let mut after_digits = after_initial_digit
-                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
 
-                if let Some(after_period) = after_digits.strip_prefix('.') {
-                    token_kind = TokenKind::Float;
-                    after_digits =
-                        after_period.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
-                }
-
-                if let Some(after_exponent) = after_digits.strip_prefix(['E', 'e']) {
-                    token_kind = TokenKind::Float;
-                    after_digits = after_exponent
-                        .strip_prefix(['+', '-'])
-                        .unwrap_or(after_exponent)
-                        .trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
-                }
-
-                let end = after_digits
-                    .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-
-                (token_kind, rest.len() - end.len(), true)
-            }
-        } else if let Some(after_quote) = rest.strip_prefix('\'') {
-            // Implementing label detection can be kindof hard to wrap your head around.
-
-            // Examples for valid chars and labels:
-
-            // input | ident | ' after
-            //       | chars | ident
-            // ------+-------+--------
-            // ''    |     0 | true
-            // 'a'   |     1 | true
-            // 'ab'  |     2 | true
-            // '?'   |     0 | false
-            // ------+-------+--------
-            // 'a    |     1 | false
-            // 'ab   |     2 | false
-
-            // Truth table based on the examples above:
-
-            //   | true | false
-            // --+------+------
-            // 0 | char | char
-            // 1 | char | label
-            // 2 | char | label
-
-            // Reading from the truth table:
-            // is_char = (ident chars) < 1 || (' after ident)
-
-            let after_ident_chars =
-                after_quote.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-
-            let ident_chars = after_quote.len() - after_ident_chars.len();
-            let quote_after_ident = after_ident_chars.starts_with('\'');
-
-            if ident_chars < 1 || quote_after_ident {
-                let end = lex_quoted(after_ident_chars, '\'').ok_or(TinyError)?;
-                (TokenKind::Char, rest.len() - end.len(), true)
-            } else {
-                (TokenKind::Label, rest.len() - after_ident_chars.len(), true)
-            }
-        } else if let Some(after_quote) = rest.strip_prefix("b'") {
-            let end = lex_quoted(after_quote, '\'').ok_or(TinyError)?;
-            (TokenKind::Char, rest.len() - end.len(), true)
-        } else if let Some(after_quote) = rest.strip_prefix('"') {
-            let end = lex_quoted(after_quote, '\"').ok_or(TinyError)?;
-            (TokenKind::String, rest.len() - end.len(), true)
-        } else if let Some(after_quote) = rest.strip_prefix("b\"") {
-            let end = lex_quoted(after_quote, '\"').ok_or(TinyError)?;
-            (TokenKind::String, rest.len() - end.len(), true)
-        } else if rest.starts_with("r#") || rest.starts_with("r\"") {
-            let end = lex_raw_string(&rest[1..]).ok_or(TinyError)?;
-            (TokenKind::String, rest.len() - end.len(), true)
-        } else if rest.starts_with("br#") || rest.starts_with("br\"") {
-            let end = lex_raw_string(&rest[2..]).ok_or(TinyError)?;
-            (TokenKind::String, rest.len() - end.len(), true)
-        } else if rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
-            let ident_len = rest
-                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .unwrap_or(rest.len());
-            if let Some(keyword) = FixedTokenKind::parse_keyword(rest[..ident_len].as_bytes()) {
-                (keyword.into(), ident_len, false)
-            } else {
-                (TokenKind::Ident, ident_len, true)
-            }
-        } else if let Some((symbol, len)) = FixedTokenKind::parse_symbol(rest.as_bytes()) {
-            (symbol.into(), len, false)
+        let (kind, len) = if let Some(kind_len) = lex_doc_comment(rest) {
+            kind_len
+        } else if let Some(kind_len) = lex_integer_or_float(rest) {
+            kind_len
+        } else if let Some(kind_len) = lex_char_or_label(rest).map_err(|_| TinyError)? {
+            kind_len
+        } else if let Some(kind_len) = lex_quoted(rest).map_err(|_| TinyError)? {
+            kind_len
+        } else if let Some(kind_len) = lex_raw_string(rest).map_err(|_| TinyError)? {
+            kind_len
+        } else if let Some(kind_len) = lex_keyword_or_ident(rest) {
+            kind_len
+        } else if let Some((kind, len)) = FixedTokenKind::parse_symbol(rest.as_bytes()) {
+            (kind.into(), len)
+        } else if let Some(kind) = FixedTokenKind::parse_char(rest.as_bytes()[0]) {
+            (kind.into(), 1)
         } else {
-            let kind = FixedTokenKind::parse_char(rest.as_bytes()[0]).ok_or(TinyError)?;
-            (kind.into(), 1, false)
+            return Err(TinyError);
         };
 
         self.pos += len;
         Ok(TinyLexerToken {
             kind,
-            text: if dynamic {
+            text: if kind.is_dynamic() {
                 rest[..len].into()
             } else {
                 SmolStr::default()
             },
         })
-    }
-
-    /// Skips over whitespace, and returns [`None`] if EOF was reached.
-    pub(crate) fn skip_whitespace(&mut self) -> Option<TinyResult<()>> {
-        loop {
-            match self.code[self.pos..].bytes().next() {
-                None => break None,
-                Some(c) if c.is_ascii_whitespace() => {
-                    self.pos = self.code[self.pos + 1..]
-                        .find(|c: char| !c.is_ascii_whitespace())
-                        .map_or(self.code.len(), |len| self.pos + len + 1);
-                }
-                Some(b'/') => {
-                    if self.code[self.pos + 1..].starts_with("//") {
-                        break Some(Ok(()));
-                    } else if self.code[self.pos + 1..].starts_with('/') {
-                        self.pos += 2 + find_line_break(&self.code[self.pos + 2..]);
-                    } else if self.code[self.pos + 1..].starts_with('*') {
-                        let start_len = self.code[self.pos..].len();
-                        let mut after_block_comment = &self.code[self.pos + 2..];
-                        let mut nesting: usize = 0;
-                        loop {
-                            let Some(len) = after_block_comment.find("*/") else {
-                                return Some(Err(TinyError));
-                            };
-                            if let Some(open) = after_block_comment[..len].find("/*") {
-                                after_block_comment = &after_block_comment[open + 2..];
-                                nesting += 1;
-                            } else {
-                                after_block_comment = &after_block_comment[len + 2..];
-                                if nesting == 0 {
-                                    self.pos += start_len - after_block_comment.len();
-                                    break;
-                                }
-                                nesting -= 1;
-                            }
-                        }
-                    } else {
-                        break Some(Ok(()));
-                    }
-                }
-                _ => break Some(Ok(())),
-            }
-        }
     }
 }
 
@@ -190,7 +63,10 @@ impl Iterator for TinyLexer<'_> {
     type Item = TinyResult<TinyLexerToken>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(self.skip_whitespace()?.and_then(|_| self.next_token()))
+        match lex_whitespace(self.code, &mut self.pos) {
+            Ok(eof) => (!eof).then(|| self.next_token()),
+            Err(UnterminatedBlockComment) => Some(Err(TinyError)),
+        }
     }
 }
 

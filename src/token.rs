@@ -31,6 +31,10 @@ macro_rules! impl_token_kind {
                 }
             }
 
+            pub(crate) const fn is_dynamic(self) -> bool {
+                matches!(self, $( Self::$Dynamic )|* )
+            }
+
             pub(crate) const fn as_fixed(self) -> Option<FixedTokenKind> {
                 match self {
                     $( Self::$Keyword => Some(FixedTokenKind::$Keyword), )*
