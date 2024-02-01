@@ -11,14 +11,6 @@ pub(crate) struct MismatchedQuotes;
 pub(crate) struct UnterminatedBlockComment;
 
 /// Lexes a doc comment, returning the token kind and the length of the token.
-///
-/// # Examples
-///
-/// ```
-/// assert_eq!(lex_doc_comment("/// hello"), Some((TokenKind::DocComment, 9)));
-/// assert_eq!(lex_doc_comment("/// hello\nnew line"), Some((TokenKind::DocComment, 9)));
-/// assert_eq!(lex_doc_comment("// not a doc comment"), None);
-/// ```
 pub(crate) fn lex_doc_comment(rest: &str) -> Option<(TokenKind, usize)> {
     Some((
         TokenKind::DocComment,
@@ -27,21 +19,6 @@ pub(crate) fn lex_doc_comment(rest: &str) -> Option<(TokenKind, usize)> {
 }
 
 /// Lexes an integer or float, returning the token kind and the length of the token.
-///
-/// # Examples
-///
-/// ```
-/// # use crate::token::TokenKind;
-/// assert_eq!(lex_integer_or_float("123      "), Some((TokenKind::Integer, 3)));
-/// assert_eq!(lex_integer_or_float("0xFF     "), Some((TokenKind::Integer, 4)));
-/// assert_eq!(lex_integer_or_float("0b101010 "), Some((TokenKind::Integer, 8)));
-/// assert_eq!(lex_integer_or_float("0o777    "), Some((TokenKind::Integer, 5)));
-///
-/// assert_eq!(lex_integer_or_float("42.0  "), Some((TokenKind::Float, 4)));
-/// assert_eq!(lex_integer_or_float("42E3  "), Some((TokenKind::Float, 4)));
-/// assert_eq!(lex_integer_or_float("10E+3 "), Some((TokenKind::Float, 5)));
-/// assert_eq!(lex_integer_or_float("10E-3 "), Some((TokenKind::Float, 5)));
-/// ```
 pub(crate) fn lex_integer_or_float(rest: &str) -> Option<(TokenKind, usize)> {
     let after_initial_digit = rest.strip_prefix(|c: char| c.is_ascii_digit())?;
     Some(
@@ -106,20 +83,6 @@ pub(crate) fn lex_integer_or_float(rest: &str) -> Option<(TokenKind, usize)> {
 /// ```
 ///
 /// Reading from the truth table: `is_char = (ident chars) < 1 || (' after ident)`
-///
-/// # Examples
-///
-/// ```
-/// # use crate::token::TokenKind;
-/// assert_eq!(lex_char_or_label("'    "), None);
-/// assert_eq!(lex_char_or_label("'?   "), Some((TokenKind::Label, 2)));
-/// assert_eq!(lex_char_or_label("'?'  "), Some((TokenKind::Label, 2)));
-/// assert_eq!(lex_char_or_label("''   "), Some((TokenKind::Char, 0)));
-/// assert_eq!(lex_char_or_label("'a   "), None);
-/// assert_eq!(lex_char_or_label("'a'  "), Some((TokenKind::Char, 3)));
-/// assert_eq!(lex_char_or_label("'ab  "), None);
-/// assert_eq!(lex_char_or_label("'ab' "), Some((TokenKind::Char, 4)));
-/// ```
 pub(crate) fn lex_char_or_label(
     rest: &str,
 ) -> Result<Option<(TokenKind, usize)>, MismatchedQuotes> {
@@ -144,16 +107,16 @@ pub(crate) fn lex_char_or_label(
 ///
 /// Regular chars are handled by [`lex_char_or_label`], since distingushing those is a bit tricky.
 pub(crate) fn lex_quoted(rest: &str) -> Result<Option<(TokenKind, usize)>, MismatchedQuotes> {
-    let (after_quote, end_quote) = if let Some(after_quote) = rest.strip_prefix("b'") {
-        (after_quote, '\'')
+    let (kind, after_quote, end_quote) = if let Some(after_quote) = rest.strip_prefix("b'") {
+        (TokenKind::Char, after_quote, '\'')
     } else if let Some(after_quote) = rest.strip_prefix('"').or_else(|| rest.strip_prefix("b\"")) {
-        (after_quote, '"')
+        (TokenKind::String, after_quote, '"')
     } else {
         return Ok(None);
     };
 
     let end = lex_quoted_content(after_quote, end_quote)?;
-    Ok(Some((TokenKind::String, rest.len() - end.len())))
+    Ok(Some((kind, rest.len() - end.len())))
 }
 
 /// Lexes a raw string or byte-string, returning the token kind and the length of the token.
@@ -166,18 +129,20 @@ pub(crate) fn lex_raw_string(rest: &str) -> Result<Option<(TokenKind, usize)>, M
         return Ok(None);
     };
 
-    let after_pound = after_r.trim_matches('#');
-    let start_pounds = &after_r[0..(after_r.len() - after_pound.len())];
-    let mut after_quote = after_pound.strip_prefix('"').unwrap_or(after_pound);
+    let after_pound = after_r.trim_start_matches('#');
+    let start_pounds = &after_r[0..after_r.len() - after_pound.len()];
+    let mut after_quote = after_pound.strip_prefix('"').ok_or(MismatchedQuotes)?;
     loop {
-        after_quote = after_quote.trim_start_matches(|c: char| c != '"');
-        if let Some(end_pounds) = after_quote.strip_prefix('"') {
+        if let Some(end_pounds) = after_quote
+            .trim_start_matches(|c: char| c != '"')
+            .strip_prefix('"')
+        {
             if let Some(end) = end_pounds.strip_prefix(start_pounds) {
                 break Ok(Some((TokenKind::String, rest.len() - end.len())));
             }
             after_quote = end_pounds;
         } else {
-            return Err(MismatchedQuotes);
+            break Err(MismatchedQuotes);
         }
     }
 }
@@ -289,28 +254,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_lex_doc_comment() {
+        assert_eq!(lex_doc_comment(""), None);
+        assert_eq!(lex_doc_comment("not a doc comment"), None);
+        assert_eq!(lex_doc_comment("// normal comment"), None);
+
+        assert_eq!(lex_doc_comment("/// foo"), Some((TokenKind::DocComment, 7)));
+        assert_eq!(lex_doc_comment("///\na"), Some((TokenKind::DocComment, 4)));
+    }
+
+    #[test]
     fn test_lex_integer_or_float() {
-        todo!()
+        assert_eq!(lex_integer_or_float(""), None);
+        assert_eq!(lex_integer_or_float("not a number"), None);
+
+        assert_eq!(lex_integer_or_float("123"), Some((TokenKind::Integer, 3)));
+        assert_eq!(lex_integer_or_float("0xFF"), Some((TokenKind::Integer, 4)));
+        assert_eq!(lex_integer_or_float("0b101"), Some((TokenKind::Integer, 5)));
+        assert_eq!(lex_integer_or_float("0o777"), Some((TokenKind::Integer, 5)));
+
+        assert_eq!(lex_integer_or_float("42.0"), Some((TokenKind::Float, 4)));
+        assert_eq!(lex_integer_or_float("42E3"), Some((TokenKind::Float, 4)));
+        assert_eq!(lex_integer_or_float("10E+3"), Some((TokenKind::Float, 5)));
+        assert_eq!(lex_integer_or_float("10E-3"), Some((TokenKind::Float, 5)));
     }
 
     #[test]
     fn test_lex_char_or_label() {
-        todo!()
+        assert_eq!(lex_char_or_label(""), Ok(None));
+        assert_eq!(lex_char_or_label("a"), Ok(None));
+        assert_eq!(lex_char_or_label("'"), Err(MismatchedQuotes));
+        assert_eq!(lex_char_or_label("'?"), Err(MismatchedQuotes));
+        assert_eq!(lex_char_or_label("'?'"), Ok(Some((TokenKind::Char, 3))));
+        assert_eq!(lex_char_or_label("''"), Ok(Some((TokenKind::Char, 2))));
+        assert_eq!(lex_char_or_label("'a"), Ok(Some((TokenKind::Label, 2))));
+        assert_eq!(lex_char_or_label("'a'"), Ok(Some((TokenKind::Char, 3))));
+        assert_eq!(lex_char_or_label("'ab"), Ok(Some((TokenKind::Label, 3))));
+        assert_eq!(lex_char_or_label("'ab'"), Ok(Some((TokenKind::Char, 4))));
     }
 
     #[test]
     fn test_lex_quoted() {
-        todo!()
+        assert_eq!(lex_quoted(""), Ok(None));
+        assert_eq!(lex_quoted("a"), Ok(None));
+        assert_eq!(lex_quoted("\""), Err(MismatchedQuotes));
+        assert_eq!(lex_quoted("\"\""), Ok(Some((TokenKind::String, 2))));
+        assert_eq!(lex_quoted("\"\"foo"), Ok(Some((TokenKind::String, 2))));
+        assert_eq!(lex_quoted("\"\"\""), Ok(Some((TokenKind::String, 2))));
+        assert_eq!(lex_quoted("\"nice\""), Ok(Some((TokenKind::String, 6))));
+        assert_eq!(lex_quoted("\"nice\"foo"), Ok(Some((TokenKind::String, 6))));
+        assert_eq!(lex_quoted("\"\\\""), Err(MismatchedQuotes));
+        assert_eq!(lex_quoted("\"\\\"\""), Ok(Some((TokenKind::String, 4))));
+        assert_eq!(lex_quoted("\"\\\"\"foo"), Ok(Some((TokenKind::String, 4))));
+        assert_eq!(lex_quoted("\"\\\\\""), Ok(Some((TokenKind::String, 4))));
+        assert_eq!(lex_quoted("\"\\\\\"foo"), Ok(Some((TokenKind::String, 4))));
+
+        assert_eq!(lex_quoted("b\"bytes\""), Ok(Some((TokenKind::String, 8))));
+        assert_eq!(lex_quoted("b'X'"), Ok(Some((TokenKind::Char, 4)))); // X
+
+        assert_eq!(lex_quoted("b'\"'"), Ok(Some((TokenKind::Char, 4)))); // X
+        assert_eq!(lex_quoted("\"'\""), Ok(Some((TokenKind::String, 3))));
     }
 
     #[test]
     fn test_lex_raw_string() {
-        todo!()
+        assert_eq!(lex_raw_string(""), Ok(None));
+        assert_eq!(lex_raw_string("a"), Ok(None));
+
+        assert_eq!(lex_raw_string("r"), Ok(None));
+        assert_eq!(lex_raw_string("r\""), Err(MismatchedQuotes));
+        assert_eq!(lex_raw_string("r#\""), Err(MismatchedQuotes));
+        assert_eq!(lex_raw_string("r###\""), Err(MismatchedQuotes));
+        assert_eq!(lex_raw_string("rb"), Ok(None));
+        assert_eq!(lex_raw_string("rb\""), Ok(None));
+
+        assert_eq!(lex_raw_string("b"), Ok(None));
+        assert_eq!(lex_raw_string("br"), Ok(None));
+        assert_eq!(lex_raw_string("br\""), Err(MismatchedQuotes));
+        assert_eq!(lex_raw_string("br#\""), Err(MismatchedQuotes));
+        assert_eq!(lex_raw_string("br###\""), Err(MismatchedQuotes));
+
+        assert_eq!(lex_raw_string("r\"foo\""), Ok(Some((TokenKind::String, 6))));
+        assert_eq!(
+            lex_raw_string("r\"foo\"bar\""),
+            Ok(Some((TokenKind::String, 6)))
+        );
+        assert_eq!(
+            lex_raw_string("r#\"foo\"bar\"#"),
+            Ok(Some((TokenKind::String, 12)))
+        );
+        assert_eq!(
+            lex_raw_string("r###\"foo\"##bar\"###"),
+            Ok(Some((TokenKind::String, 18)))
+        );
+        assert_eq!(
+            lex_raw_string("r###\"foo\"##bar\"####"),
+            Ok(Some((TokenKind::String, 18)))
+        );
     }
 
     #[test]
     fn test_lex_keyword_or_ident() {
-        todo!()
+        assert_eq!(lex_keyword_or_ident(""), None);
+        assert_eq!(lex_keyword_or_ident("42"), None);
+        assert_eq!(lex_keyword_or_ident("42foo"), None);
+        assert_eq!(lex_keyword_or_ident("."), None);
+
+        assert_eq!(lex_keyword_or_ident("fn"), Some((TokenKind::Fn, 2)));
+        assert_eq!(lex_keyword_or_ident("_"), Some((TokenKind::Underscore, 1)));
+
+        assert_eq!(lex_keyword_or_ident("foo"), Some((TokenKind::Ident, 3)));
+        assert_eq!(lex_keyword_or_ident("foo42"), Some((TokenKind::Ident, 5)));
+        assert_eq!(lex_keyword_or_ident("_foo"), Some((TokenKind::Ident, 4)));
+        assert_eq!(lex_keyword_or_ident("_42"), Some((TokenKind::Ident, 3)));
+        assert_eq!(lex_keyword_or_ident("_42foo"), Some((TokenKind::Ident, 6)));
+        assert_eq!(lex_keyword_or_ident("_foo42"), Some((TokenKind::Ident, 6)));
     }
 
     #[test]
