@@ -4,29 +4,30 @@ use smol_str::SmolStr;
 
 use crate::{
     parser::{NodeStack, ParseImpl},
-    tiny::lexer::{CheckedTinyTokenStream, TinyTokenStream},
-    token::{Expect, NestedTokenSet, Tiny},
+    tiny::{
+        lexer::{CheckedTinyTokenStream, TinyTokenStream},
+        TinyResult,
+    },
+    token::{Expect, Tiny},
 };
-
-use super::TinyResult;
 
 /// A single iterative parsing step.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TinyParseFn<T: TinyTokenStream> {
-    pub(crate) parse: fn(
+struct TinyParseFn<T: TinyTokenStream> {
+    parse: fn(
         state: &mut TinyParseState<T>,
         expect: Expect,
         field: usize,
         repetition: bool,
     ) -> TinyResult<()>,
-    pub(crate) expect: Expect,
-    pub(crate) field: usize,
-    pub(crate) repetition: bool,
+    expect: Expect,
+    field: usize,
+    repetition: bool,
 }
 
 impl<T: TinyTokenStream> TinyParseFn<T> {
     /// Calls the `parse` function.
-    pub(crate) fn parse(self, state: &mut TinyParseState<T>) -> TinyResult<()> {
+    fn parse(self, state: &mut TinyParseState<T>) -> TinyResult<()> {
         (self.parse)(state, self.expect, self.field, self.repetition)
     }
 }
@@ -36,8 +37,8 @@ impl<T: TinyTokenStream> TinyParseFn<T> {
 /// Consists of a token stream and stacks for parsing steps, tokens and nodes.
 #[derive(Debug)]
 pub(crate) struct TinyParseState<T: TinyTokenStream> {
+    parsers: Vec<TinyParseFn<T>>,
     pub(crate) token_stream: CheckedTinyTokenStream<T>,
-    pub(crate) parsers: Vec<TinyParseFn<T>>,
     pub(crate) tokens: TinyTokenStack,
     pub(crate) nodes: NodeStack<Tiny>,
 }
@@ -46,8 +47,8 @@ impl<T: TinyTokenStream> TinyParseState<T> {
     /// Creates a new parsing state from a token stream.
     pub(crate) fn new(token_stream: CheckedTinyTokenStream<T>) -> Self {
         Self {
-            token_stream,
             parsers: Vec::new(),
+            token_stream,
             tokens: TinyTokenStack::new(),
             nodes: NodeStack::new(),
         }
@@ -148,9 +149,9 @@ pub(crate) trait TinyParse: TinyParseImpl {
         while let Some(parser) = state.parsers.pop() {
             parser.parse(&mut state)?;
         }
-        assert!(state.tokens.finish(), "leftover tokens after parsing");
+        assert!(state.tokens.finish(), "token stack should be empty");
         let result = Self::pop_final_node(&mut state.nodes);
-        assert!(state.nodes.finish(), "leftover nodes after parsing");
+        assert!(state.nodes.finish(), "node stack should be empty");
         Ok(result)
     }
 }
@@ -174,13 +175,13 @@ pub(crate) struct TinyTokenStack {
 
 impl TinyTokenStack {
     /// Creates an empty stack.
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self::default()
     }
 
     /// Consumes [`self`] and returns if the stack is empty, which should always be the case at the
     /// end of parsing.
-    pub(crate) fn finish(self) -> bool {
+    fn finish(self) -> bool {
         self.dynamic_tokens.is_empty()
             && self.optionals.is_empty()
             && self.fixed_repetitions.is_empty()
