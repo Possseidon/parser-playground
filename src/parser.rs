@@ -12,7 +12,7 @@ use crate::{
         parser::{TinyParseImpl, TinyParseState},
         TinyResult,
     },
-    token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenSet, TokenStorage},
+    token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenStorage},
 };
 
 pub(crate) trait ParseImpl {
