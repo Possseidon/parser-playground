@@ -191,6 +191,7 @@ pub(crate) fn lex_whitespace(
                     let mut nesting: usize = 0;
                     loop {
                         let Some(len) = after_block_comment.find("*/") else {
+                            *pos = code.len();
                             return Err(UnterminatedBlockComment);
                         };
                         if let Some(open) = after_block_comment[..len].find("/*") {
@@ -389,8 +390,8 @@ mod tests {
         test("/// foo", 0, Ok(false));
         test("/*foo bar*/", 11, Ok(true));
         test("/*foo bar*/bar", 11, Ok(false));
-        test("/*/", 0, Err(UnterminatedBlockComment));
-        test("/*/**/", 0, Err(UnterminatedBlockComment));
+        test("/*/", 3, Err(UnterminatedBlockComment));
+        test("/*/**/", 6, Err(UnterminatedBlockComment));
         test("/*/**/*/", 8, Ok(true));
         test("/*/**/*/foo", 8, Ok(false));
         test("/**/", 4, Ok(true));
