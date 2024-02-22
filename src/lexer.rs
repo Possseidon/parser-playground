@@ -1,6 +1,73 @@
+use std::mem::replace;
+
 use thiserror::Error;
 
-use crate::token::{FixedTokenKind, TokenKind};
+use crate::token::{Expect, FixedTokenKind, Positioned, Style, TokenKind, TokenSet};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LexerToken<S: Style> {
+    pub(crate) kind: TokenKind,
+    pub(crate) token: S::Token,
+}
+
+impl<S: Style> Copy for LexerToken<S> where S::Token: Copy {}
+
+/// A [`TinyLexer`] that also makes sure the next token matches what is [`Expect`]ed.
+#[derive(Debug)]
+pub(crate) struct CheckedLexer<'code, S: Style> {
+    lexer: S::Lexer<'code>,
+    current_kind: Option<TokenKind>,
+    next_token: S::Token,
+}
+
+impl<'code, S: Style> CheckedLexer<'code, S> {
+    pub(crate) fn new(lexer: S::Lexer<'code>, expect: Expect) -> Result<Self, S::Error> {
+        let mut result = Self {
+            lexer,
+            current_kind: None,
+            next_token: S::ARBITRARY_TOKEN,
+        };
+        result.next(expect)?; // replace empty current token with actual first token
+        Ok(result)
+    }
+
+    pub(crate) fn kind(&self) -> TokenKind {
+        self.current_kind.expect("token kind should be set")
+    }
+
+    pub(crate) fn matches(&self, tokens: impl Into<TokenSet>) -> bool {
+        self.current_kind
+            .is_some_and(|kind| tokens.into().contains(kind))
+    }
+
+    /// Yields a token from the lexer while also making sure the token afterwards matches `expect`.
+    pub(crate) fn next(&mut self, expect: Expect) -> Result<S::Token, S::Error> {
+        if let Some(next_token) = self.lexer.next() {
+            let next_token = next_token?;
+            if expect.tokens.contains(next_token.kind) {
+                self.current_kind = Some(next_token.kind);
+                Ok(replace(&mut self.next_token, next_token.token))
+            } else {
+                Err(S::unexpected_token(
+                    &self.lexer,
+                    expect,
+                    Some(next_token.kind),
+                ))
+            }
+        } else if expect.or_end_of_input {
+            self.current_kind = None;
+            Ok(replace(&mut self.next_token, S::ARBITRARY_TOKEN))
+        } else {
+            Err(S::unexpected_token(&self.lexer, expect, None))
+        }
+    }
+}
+
+impl CheckedLexer<'_, Positioned> {
+    pub(crate) fn pos(&self) -> usize {
+        self.lexer.pos()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub(crate) enum Unterminated {

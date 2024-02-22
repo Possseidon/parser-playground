@@ -5,6 +5,16 @@ use paste::paste;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
+use crate::{
+    lexer::{CheckedLexer, LexerToken},
+    parser::ParseState,
+    positioned::{
+        lexer::{LexerError, OptionalTokenSpan, PositionedLexer, PositionedLexerError, TokenSpan},
+        parser::PositionedTokenStack,
+    },
+    tiny::{lexer::TinyLexer, parser::TinyTokenStack, TinyError},
+};
+
 macro_rules! impl_token_kind {
     (
         $( $Dynamic:ident )*
@@ -109,15 +119,7 @@ macro_rules! impl_token_kind {
         }
 
         pub(crate) mod tokens {
-            use crate::{
-                tiny::{
-                    TinyResult,
-                    lexer::CheckedTinyLexer,
-                    parser::TinyParseState,
-                },
-            };
-
-            use super::{Expect, Style, TokenStorage, Tiny, TokenKind, TokenSet};
+            use super::{CheckedLexer, Expect, ParseState, Style, TokenKind, TokenStorage};
 
             $(
                 pub(crate) struct $Dynamic;
@@ -129,58 +131,64 @@ macro_rules! impl_token_kind {
                 }
 
                 impl $Dynamic {
-                    pub(crate) fn parse_required(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Required> {
-                        lexer.next(expect)
+                    pub(crate) fn parse_required<S: Style>(
+                        lexer: &mut CheckedLexer<S>,
+                        expect: Expect,
+                    ) -> Result<S::DynamicRequired, S::Error> {
+                        S::dynamic_required(lexer, expect)
                     }
 
-                    pub(crate) fn parse_optional(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Optional> {
-                        Ok(if lexer.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
-                            Some(lexer.next(expect)?)
-                        } else {
-                            None
-                        })
+                    pub(crate) fn parse_optional<S: Style>(
+                        lexer: &mut CheckedLexer<S>,
+                        expect: Expect,
+                    ) -> Result<S::DynamicOptional, S::Error> {
+                        S::dynamic_optional(lexer, TokenKind::$Dynamic, expect)
                     }
 
-                    pub(crate) fn parse_repetition(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Repetition> {
-                        let mut result = <Self as TokenStorage<Tiny>>::Repetition::new();
-                        while lexer.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
-                            result.push(lexer.next(expect)?);
-                        }
-                        Ok(result)
+                    pub(crate) fn parse_repetition<S: Style>(
+                        lexer: &mut CheckedLexer<S>,
+                        expect: Expect,
+                    ) -> Result<S::DynamicRepetition, S::Error> {
+                        S::dynamic_repetition(lexer, TokenKind::$Dynamic, expect)
                     }
 
-                    pub(crate) fn tiny_push_required(state: &mut TinyParseState, expect: Expect) -> TinyResult<()> {
-                        state.tokens.push_dynamic(state.lexer.next(expect)?);
-                        Ok(())
+                    pub(crate) fn push_required<S: Style>(
+                        parser: &mut ParseState<S>,
+                        expect: Expect,
+                    ) -> Result<(), S::Error> {
+                        S::push_dynamic_required(parser, expect)
                     }
 
-                    pub(crate) fn tiny_pop_required(state: &mut TinyParseState) -> <Self as TokenStorage<Tiny>>::Required {
-                        state.tokens.pop_dynamic()
+                    pub(crate) fn push_optional<S: Style>(
+                        parser: &mut ParseState<S>,
+                        expect: Expect,
+                    ) -> Result<(), S::Error> {
+                        S::push_dynamic_optional(parser, TokenKind::$Dynamic, expect)
                     }
 
-                    pub(crate) fn tiny_push_optional(state: &mut TinyParseState, expect: Expect) -> TinyResult<()> {
-                        if state.lexer.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
-                            state.tokens.push_dynamic_some(state.lexer.next(expect)?);
-                        } else {
-                            state.tokens.push_none();
-                        }
-                        Ok(())
+                    pub(crate) fn push_repetition<S: Style>(
+                        parser: &mut ParseState<S>,
+                        expect: Expect,
+                    ) -> Result<(), S::Error> {
+                        S::push_dynamic_repetition(parser, TokenKind::$Dynamic, expect)
                     }
 
-                    pub(crate) fn tiny_pop_optional(state: &mut TinyParseState) -> <Self as TokenStorage<Tiny>>::Optional {
-                        state.tokens.pop_dynamic_optional()
+                    pub(crate) fn pop_required<S: Style>(
+                        parser: &mut ParseState<S>,
+                    ) -> S::DynamicRequired {
+                        S::pop_dynamic_required(parser)
                     }
 
-                    pub(crate) fn tiny_push_repetition(state: &mut TinyParseState, expect: Expect) -> TinyResult<()> {
-                        state.tokens.start_dynamic_repetition();
-                        while state.lexer.matches(TokenSet::from_kind(TokenKind::$Dynamic)) {
-                            state.tokens.push_dynamic(state.lexer.next(expect)?);
-                        }
-                        Ok(())
+                    pub(crate) fn pop_optional<S: Style>(
+                        parser: &mut ParseState<S>,
+                    ) -> S::DynamicOptional {
+                        S::pop_dynamic_optional(parser)
                     }
 
-                    pub(crate) fn tiny_pop_repetition(state: &mut TinyParseState) -> <Self as TokenStorage<Tiny>>::Repetition {
-                        state.tokens.pop_dynamic_repetition().collect()
+                    pub(crate) fn pop_repetition<S: Style>(
+                        parser: &mut ParseState<S>,
+                    ) -> S::DynamicRepetition {
+                        S::pop_dynamic_repetition(parser)
                     }
                 }
             )*
@@ -201,61 +209,64 @@ macro_rules! impl_fixed_token_kind {
         }
 
         impl $Kind {
-            pub(crate) fn parse_required(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Required> {
-                lexer.next(expect)?;
-                Ok(())
+            pub(crate) fn parse_required<S: Style>(
+                lexer: &mut CheckedLexer<S>,
+                expect: Expect,
+            ) -> Result<S::FixedRequired, S::Error> {
+                S::fixed_required(lexer, expect)
             }
 
-            pub(crate) fn parse_optional(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Optional> {
-                let result = lexer.matches(TokenSet::from_kind(TokenKind::$Kind));
-                if result {
-                    lexer.next(expect)?;
-                }
-                Ok(result)
+            pub(crate) fn parse_optional<S: Style>(
+                lexer: &mut CheckedLexer<S>,
+                expect: Expect,
+            ) -> Result<S::FixedOptional, S::Error> {
+                S::fixed_optional(lexer, TokenKind::$Kind, expect)
             }
 
-            pub(crate) fn parse_repetition(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<<Self as TokenStorage<Tiny>>::Repetition> {
-                let mut count = 0;
-                while lexer.matches(TokenSet::from_kind(TokenKind::$Kind)) {
-                    lexer.next(expect)?;
-                    count += 1;
-                }
-                Ok(count)
+            pub(crate) fn parse_repetition<S: Style>(
+                lexer: &mut CheckedLexer<S>,
+                expect: Expect,
+            ) -> Result<S::FixedRepetition, S::Error> {
+                S::fixed_repetition(lexer, TokenKind::$Kind, expect)
             }
 
-            pub(crate) fn tiny_push_required(state: &mut TinyParseState, expect: Expect) -> TinyResult<()> {
-                state.lexer.next(expect)?;
-                Ok(())
+            pub(crate) fn push_required<S: Style>(
+                parser: &mut ParseState<S>,
+                expect: Expect,
+            ) -> Result<(), S::Error> {
+                S::push_fixed_required(parser, expect)
             }
 
-            pub(crate) fn tiny_pop_required(state: &mut TinyParseState) -> <Self as TokenStorage<Tiny>>::Required {}
-
-            pub(crate) fn tiny_push_optional(state: &mut TinyParseState, expect: Expect) -> TinyResult<()> {
-                if state.lexer.matches(TokenSet::from_kind(TokenKind::$Kind)) {
-                    state.lexer.next(expect)?;
-                    state.tokens.push_fixed_some();
-                } else {
-                    state.tokens.push_none();
-                }
-                Ok(())
+            pub(crate) fn push_optional<S: Style>(
+                parser: &mut ParseState<S>,
+                expect: Expect,
+            ) -> Result<(), S::Error> {
+                S::push_fixed_optional(parser, TokenKind::$Kind, expect)
             }
 
-            pub(crate) fn tiny_pop_optional(state: &mut TinyParseState) -> <Self as TokenStorage<Tiny>>::Optional {
-                state.tokens.pop_fixed_optional()
+            pub(crate) fn push_repetition<S: Style>(
+                parser: &mut ParseState<S>,
+                expect: Expect,
+            ) -> Result<(), S::Error> {
+                S::push_fixed_repetition(parser, TokenKind::$Kind, expect)
             }
 
-            pub(crate) fn tiny_push_repetition(state: &mut TinyParseState, expect: Expect) -> TinyResult<()> {
-                let mut count = 0;
-                while state.lexer.matches(TokenSet::from_kind(TokenKind::$Kind)) {
-                    state.lexer.next(expect)?;
-                    count += 1;
-                }
-                state.tokens.push_fixed_repetition(count);
-                Ok(())
+            pub(crate) fn pop_required<S: Style>(
+                parser: &mut ParseState<S>,
+            ) -> S::FixedRequired {
+                S::pop_fixed_required(parser)
             }
 
-            pub(crate) fn tiny_pop_repetition(state: &mut TinyParseState) -> <Self as TokenStorage<Tiny>>::Repetition {
-                state.tokens.pop_fixed_repetition()
+            pub(crate) fn pop_optional<S: Style>(
+                parser: &mut ParseState<S>,
+            ) -> S::FixedOptional {
+                S::pop_fixed_optional(parser)
+            }
+
+            pub(crate) fn pop_repetition<S: Style>(
+                parser: &mut ParseState<S>,
+            ) -> S::FixedRepetition {
+                S::pop_fixed_repetition(parser)
             }
         }
     )* };
@@ -382,6 +393,89 @@ pub(crate) trait Style: Clone + fmt::Debug + PartialEq + Eq {
     type DynamicRequired: Clone + fmt::Debug + PartialEq + Eq;
     type DynamicOptional: Clone + fmt::Debug + PartialEq + Eq;
     type DynamicRepetition: Clone + fmt::Debug + PartialEq + Eq;
+
+    type Lexer<'code>: fmt::Debug + Iterator<Item = Result<LexerToken<Self>, Self::Error>>;
+    type Token: fmt::Debug;
+    type TokenStack: fmt::Debug + Default;
+    type Error: fmt::Debug;
+
+    const ARBITRARY_TOKEN: Self::Token;
+
+    fn new_lexer(code: &str) -> Self::Lexer<'_>;
+
+    fn finish_token_stack(stack: Self::TokenStack) -> bool;
+
+    fn unexpected_token(
+        lexer: &Self::Lexer<'_>,
+        expect: Expect,
+        found: Option<TokenKind>,
+    ) -> Self::Error;
+
+    fn fixed_required(
+        lexer: &mut CheckedLexer<Self>,
+        expect: Expect,
+    ) -> Result<Self::FixedRequired, Self::Error>;
+    fn fixed_optional(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::FixedOptional, Self::Error>;
+    fn fixed_repetition(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::FixedRepetition, Self::Error>;
+
+    fn dynamic_required(
+        lexer: &mut CheckedLexer<Self>,
+        expect: Expect,
+    ) -> Result<Self::DynamicRequired, Self::Error>;
+    fn dynamic_optional(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::DynamicOptional, Self::Error>;
+    fn dynamic_repetition(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::DynamicRepetition, Self::Error>;
+
+    fn push_dynamic_required(
+        state: &mut ParseState<Self>,
+        expect: Expect,
+    ) -> Result<(), Self::Error>;
+    fn push_dynamic_optional(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error>;
+    fn push_dynamic_repetition(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error>;
+
+    fn pop_dynamic_required(state: &mut ParseState<Self>) -> Self::DynamicRequired;
+    fn pop_dynamic_optional(state: &mut ParseState<Self>) -> Self::DynamicOptional;
+    fn pop_dynamic_repetition(state: &mut ParseState<Self>) -> Self::DynamicRepetition;
+
+    fn push_fixed_required(state: &mut ParseState<Self>, expect: Expect)
+        -> Result<(), Self::Error>;
+    fn push_fixed_optional(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error>;
+    fn push_fixed_repetition(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error>;
+
+    fn pop_fixed_required(state: &mut ParseState<Self>) -> Self::FixedRequired;
+    fn pop_fixed_optional(state: &mut ParseState<Self>) -> Self::FixedOptional;
+    fn pop_fixed_repetition(state: &mut ParseState<Self>) -> Self::FixedRepetition;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -395,19 +489,349 @@ impl Style for Tiny {
     type DynamicRequired = SmolStr;
     type DynamicOptional = Option<SmolStr>;
     type DynamicRepetition = SmallVec<[SmolStr; 1]>;
+
+    type Lexer<'code> = TinyLexer<'code>;
+    type Token = SmolStr;
+    type TokenStack = TinyTokenStack;
+    type Error = TinyError;
+
+    const ARBITRARY_TOKEN: Self::Token = SmolStr::new_inline("");
+
+    fn new_lexer(code: &str) -> Self::Lexer<'_> {
+        TinyLexer::new(code)
+    }
+
+    fn finish_token_stack(stack: Self::TokenStack) -> bool {
+        stack.finish()
+    }
+
+    fn unexpected_token(
+        _lexer: &Self::Lexer<'_>,
+        _expect: Expect,
+        _found: Option<TokenKind>,
+    ) -> Self::Error {
+        TinyError
+    }
+
+    fn fixed_required(
+        lexer: &mut CheckedLexer<Self>,
+        expect: Expect,
+    ) -> Result<Self::FixedRequired, Self::Error> {
+        lexer.next(expect)?;
+        Ok(())
+    }
+
+    fn fixed_optional(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::FixedOptional, Self::Error> {
+        let matches = lexer.matches(kind);
+        if matches {
+            lexer.next(expect)?;
+        }
+        Ok(matches)
+    }
+
+    fn fixed_repetition(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::FixedRepetition, Self::Error> {
+        let mut count = 0;
+        while lexer.matches(kind) {
+            count += 1;
+            lexer.next(expect)?;
+        }
+        Ok(count)
+    }
+
+    fn dynamic_required(
+        lexer: &mut CheckedLexer<Self>,
+        expect: Expect,
+    ) -> Result<Self::DynamicRequired, Self::Error> {
+        lexer.next(expect)
+    }
+
+    fn dynamic_optional(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::DynamicOptional, Self::Error> {
+        if lexer.matches(kind) {
+            lexer.next(expect).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn dynamic_repetition(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::DynamicRepetition, Self::Error> {
+        let mut result = SmallVec::new();
+        while lexer.matches(kind) {
+            result.push(lexer.next(expect)?);
+        }
+        Ok(result)
+    }
+
+    fn push_dynamic_required(
+        state: &mut ParseState<Self>,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        state.tokens.push_dynamic(state.lexer.next(expect)?);
+        Ok(())
+    }
+
+    fn push_dynamic_optional(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        if state.lexer.matches(kind) {
+            state.tokens.push_dynamic_some(state.lexer.next(expect)?);
+        } else {
+            state.tokens.push_none();
+        }
+        Ok(())
+    }
+
+    fn push_dynamic_repetition(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        state.tokens.start_dynamic_repetition();
+        while state.lexer.matches(kind) {
+            Self::push_dynamic_required(state, expect)?;
+        }
+        Ok(())
+    }
+
+    fn pop_dynamic_required(state: &mut ParseState<Self>) -> Self::DynamicRequired {
+        state.tokens.pop_dynamic()
+    }
+
+    fn pop_dynamic_optional(state: &mut ParseState<Self>) -> Self::DynamicOptional {
+        state.tokens.pop_dynamic_optional()
+    }
+
+    fn pop_dynamic_repetition(state: &mut ParseState<Self>) -> Self::DynamicRepetition {
+        state.tokens.pop_dynamic_repetition().collect()
+    }
+
+    fn push_fixed_required(
+        state: &mut ParseState<Self>,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        state.lexer.next(expect)?;
+        Ok(())
+    }
+
+    fn push_fixed_optional(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        if state.lexer.matches(kind) {
+            state.lexer.next(expect)?;
+            state.tokens.push_fixed_some();
+        } else {
+            state.tokens.push_none();
+        }
+        Ok(())
+    }
+
+    fn push_fixed_repetition(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        state
+            .tokens
+            .push_fixed_repetition(Self::fixed_repetition(&mut state.lexer, kind, expect)?);
+        Ok(())
+    }
+
+    fn pop_fixed_required(_state: &mut ParseState<Self>) -> Self::FixedRequired {
+        // nothing to pop
+    }
+
+    fn pop_fixed_optional(state: &mut ParseState<Self>) -> Self::FixedOptional {
+        state.tokens.pop_fixed_optional()
+    }
+
+    fn pop_fixed_repetition(state: &mut ParseState<Self>) -> Self::FixedRepetition {
+        state.tokens.pop_fixed_repetition()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Positioned;
 
 impl Style for Positioned {
-    type FixedRequired = ();
-    type FixedOptional = ();
-    type FixedRepetition = ();
+    type FixedRequired = TokenSpan;
+    type FixedOptional = OptionalTokenSpan;
+    type FixedRepetition = SmallVec<[TokenSpan; 1]>;
 
-    type DynamicRequired = ();
-    type DynamicOptional = ();
-    type DynamicRepetition = ();
+    type DynamicRequired = Self::FixedRequired;
+    type DynamicOptional = Self::FixedOptional;
+    type DynamicRepetition = Self::FixedRepetition;
+
+    type Lexer<'code> = PositionedLexer<'code>;
+    type Token = NonZeroUsize;
+    type TokenStack = PositionedTokenStack;
+    type Error = PositionedLexerError;
+
+    const ARBITRARY_TOKEN: Self::Token = NonZeroUsize::MIN;
+
+    fn new_lexer(code: &str) -> Self::Lexer<'_> {
+        PositionedLexer::new(code)
+    }
+
+    fn finish_token_stack(stack: Self::TokenStack) -> bool {
+        stack.finish()
+    }
+
+    fn unexpected_token(
+        lexer: &Self::Lexer<'_>,
+        expect: Expect,
+        found: Option<TokenKind>,
+    ) -> Self::Error {
+        PositionedLexerError {
+            pos: lexer.pos(),
+            kind: LexerError::UnexpectedToken { expect, found },
+        }
+    }
+
+    fn fixed_required(
+        lexer: &mut CheckedLexer<Self>,
+        expect: Expect,
+    ) -> Result<Self::FixedRequired, Self::Error> {
+        Ok(TokenSpan {
+            pos: lexer.pos(),
+            len: lexer.next(expect)?,
+        })
+    }
+
+    fn fixed_optional(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::FixedOptional, Self::Error> {
+        Ok(if lexer.matches(kind) {
+            OptionalTokenSpan::Some(Self::fixed_required(lexer, expect)?)
+        } else {
+            OptionalTokenSpan::None { pos: lexer.pos() }
+        })
+    }
+
+    fn fixed_repetition(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::FixedRepetition, Self::Error> {
+        let mut result = SmallVec::new();
+        while lexer.matches(kind) {
+            result.push(Self::fixed_required(lexer, expect)?);
+        }
+        Ok(result)
+    }
+
+    fn dynamic_required(
+        lexer: &mut CheckedLexer<Self>,
+        expect: Expect,
+    ) -> Result<Self::DynamicRequired, Self::Error> {
+        Self::fixed_required(lexer, expect)
+    }
+
+    fn dynamic_optional(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::DynamicOptional, Self::Error> {
+        Self::fixed_optional(lexer, kind, expect)
+    }
+
+    fn dynamic_repetition(
+        lexer: &mut CheckedLexer<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::DynamicRepetition, Self::Error> {
+        Self::fixed_repetition(lexer, kind, expect)
+    }
+
+    fn push_dynamic_required(
+        state: &mut ParseState<Self>,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn push_dynamic_optional(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn push_dynamic_repetition(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn pop_dynamic_required(state: &mut ParseState<Self>) -> Self::DynamicRequired {
+        todo!()
+    }
+
+    fn pop_dynamic_optional(state: &mut ParseState<Self>) -> Self::DynamicOptional {
+        todo!()
+    }
+
+    fn pop_dynamic_repetition(state: &mut ParseState<Self>) -> Self::DynamicRepetition {
+        todo!()
+    }
+
+    fn push_fixed_required(
+        state: &mut ParseState<Self>,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn push_fixed_optional(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn push_fixed_repetition(
+        state: &mut ParseState<Self>,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn pop_fixed_required(state: &mut ParseState<Self>) -> Self::FixedRequired {
+        todo!()
+    }
+
+    fn pop_fixed_optional(state: &mut ParseState<Self>) -> Self::FixedOptional {
+        todo!()
+    }
+
+    fn pop_fixed_repetition(state: &mut ParseState<Self>) -> Self::FixedRepetition {
+        todo!()
+    }
 }
 
 #[derive(Clone, Copy, Default, Hash, PartialEq, Eq)]
@@ -456,6 +880,12 @@ impl TokenSet {
         (0..TokenKind::LENGTH)
             .map(TokenKind::from_usize)
             .filter(move |&kind| self.contains(kind))
+    }
+}
+
+impl From<TokenKind> for TokenSet {
+    fn from(kind: TokenKind) -> Self {
+        Self::from_kind(kind)
     }
 }
 
@@ -548,5 +978,11 @@ impl NestedTokenSet {
                 or_end_of_input: expect.or_end_of_input,
             }
         }
+    }
+}
+
+impl From<TokenKind> for NestedTokenSet {
+    fn from(kind: TokenKind) -> Self {
+        Self::from_kind(kind)
     }
 }

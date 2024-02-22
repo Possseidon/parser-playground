@@ -1,16 +1,14 @@
-use std::mem::{replace, take};
-
 use smol_str::SmolStr;
 
 use crate::{
     lexer::{
         lex_char_or_label, lex_doc_comment, lex_integer_or_float, lex_keyword_or_ident, lex_quoted,
-        lex_raw_string, trim_whitespace,
+        lex_raw_string, trim_whitespace, LexerToken,
     },
-    token::{Expect, FixedTokenKind, TokenKind, TokenSet},
+    token::{FixedTokenKind, Tiny},
 };
 
-use super::{TinyError, TinyResult};
+use super::TinyError;
 
 #[derive(Debug)]
 pub(crate) struct TinyLexer<'code> {
@@ -19,11 +17,11 @@ pub(crate) struct TinyLexer<'code> {
 
 impl<'code> TinyLexer<'code> {
     pub(crate) fn new(code: &'code str) -> Self {
-        Self { code }
+        TinyLexer { code }
     }
 
     /// Yields the next token, assuming whitespace was skipped already.
-    pub(crate) fn next_token(&mut self) -> TinyResult<TinyLexerToken> {
+    pub(crate) fn next_token(&mut self) -> Result<LexerToken<Tiny>, TinyError> {
         let (kind, len) = if let Some(kind_len) = lex_doc_comment(self.code) {
             kind_len
         } else if let Some(kind_len) = lex_integer_or_float(self.code) {
@@ -44,19 +42,19 @@ impl<'code> TinyLexer<'code> {
             return Err(TinyError);
         };
 
-        let text = if kind.is_dynamic() {
+        let token = if kind.is_dynamic() {
             self.code[..len].into()
         } else {
             SmolStr::default()
         };
 
         self.code = &self.code[len..];
-        Ok(TinyLexerToken { kind, text })
+        Ok(LexerToken { kind, token })
     }
 }
 
 impl Iterator for TinyLexer<'_> {
-    type Item = TinyResult<TinyLexerToken>;
+    type Item = Result<LexerToken<Tiny>, TinyError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match trim_whitespace(self.code) {
@@ -68,58 +66,6 @@ impl Iterator for TinyLexer<'_> {
                 self.code = "";
                 Some(Err(TinyError))
             }
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TinyLexerToken {
-    kind: TokenKind,
-    text: SmolStr,
-}
-
-/// A [`TinyLexer`] that also makes sure the next token matches what is [`Expect`]ed.
-#[derive(Debug)]
-pub(crate) struct CheckedTinyLexer<'code> {
-    lexer: TinyLexer<'code>,
-    current_kind: Option<TokenKind>,
-    next_token: SmolStr,
-}
-
-impl<'code> CheckedTinyLexer<'code> {
-    pub(crate) fn new(lexer: TinyLexer<'code>, expect: Expect) -> TinyResult<Self> {
-        let mut result = Self {
-            lexer,
-            current_kind: None,
-            next_token: SmolStr::default(),
-        };
-        result.next(expect)?; // replace empty current token with actual first token
-        Ok(result)
-    }
-
-    pub(crate) fn kind(&self) -> TokenKind {
-        self.current_kind.expect("token kind should be set")
-    }
-
-    pub(crate) fn matches(&self, tokens: TokenSet) -> bool {
-        self.current_kind.is_some_and(|kind| tokens.contains(kind))
-    }
-
-    /// Yields a token from the stream while also making sure the token afterwards matches `expect`.
-    pub(crate) fn next(&mut self, expect: Expect) -> TinyResult<SmolStr> {
-        if let Some(next_token) = self.lexer.next() {
-            let next_token = next_token?;
-            if expect.tokens.contains(next_token.kind) {
-                self.current_kind = Some(next_token.kind);
-                Ok(replace(&mut self.next_token, next_token.text))
-            } else {
-                Err(TinyError)
-            }
-        } else if expect.or_end_of_input {
-            self.current_kind = None;
-            Ok(take(&mut self.next_token))
-        } else {
-            Err(TinyError)
         }
     }
 }

@@ -9,5 +9,3 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Error)]
 #[error("input failed to parse; use a positioned parser for more accurate error messages")]
 pub(crate) struct TinyError;
-
-pub(crate) type TinyResult<T> = Result<T, TinyError>;

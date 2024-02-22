@@ -1,14 +1,8 @@
-use crate::token::{Expect, TokenKind};
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PositionedTokenStack {}
 
-enum ParseErrorKind {
-    Expected {
-        expected: Expect,
-        found: Option<TokenKind>,
-    },
-}
-
-struct ParseError {
-    kind: ParseErrorKind,
-    pos: usize,
-    len: usize,
+impl PositionedTokenStack {
+    pub(crate) fn finish(self) -> bool {
+        todo!()
+    }
 }

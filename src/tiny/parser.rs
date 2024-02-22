@@ -3,120 +3,24 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 
 use crate::{
-    parser::{NodeStack, ParseImpl},
-    tiny::{lexer::CheckedTinyLexer, TinyResult},
+    lexer::CheckedLexer,
+    parser::{ExpectedTokens, ParseImpl},
     token::{Expect, Tiny},
 };
 
-use super::lexer::TinyLexer;
+use super::{lexer::TinyLexer, TinyError};
 
-/// The state of an iterative parsing process.
-///
-/// Consists of a lexer and stacks for parsing steps, tokens and nodes.
-#[derive(Debug)]
-pub(crate) struct TinyParseState<'code> {
-    parsers: Vec<TinyParseFn<'code>>,
-    pub(crate) lexer: CheckedTinyLexer<'code>,
-    pub(crate) tokens: TinyTokenStack,
-    pub(crate) nodes: NodeStack<Tiny>,
-}
-
-impl<'code> TinyParseState<'code> {
-    /// Creates a new parsing state from a lexer.
-    pub(crate) fn new(lexer: CheckedTinyLexer<'code>) -> Self {
-        Self {
-            parsers: Vec::new(),
-            lexer,
-            tokens: TinyTokenStack::new(),
-            nodes: NodeStack::new(),
-        }
-    }
-
-    /// Pushes a new parsing step for a normal node.
-    pub(crate) fn push_parser<N: TinyParseImpl>(&mut self, expect: Expect) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field: 0,
-            repetition: false,
-        })
-    }
-
-    /// Pushes a new parsing step for building an alternation.
-    pub(crate) fn push_build_enum<N: TinyParseImpl>(&mut self, expect: Expect) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field: 1,
-            repetition: false,
-        });
-    }
-
-    /// Pushes a new parsing step that parses the next field or to build the concatenation.
-    pub(crate) fn push_next_field<N: TinyParseImpl>(&mut self, expect: Expect, field: usize) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field: field + 1,
-            repetition: false,
-        });
-    }
-
-    /// Pushes a new parsing step that parses the same field again.
-    pub(crate) fn push_repetition<N: TinyParseImpl>(&mut self, expect: Expect, field: usize) {
-        self.parsers.push(TinyParseFn {
-            parse: N::tiny_parse_iterative,
-            expect,
-            field,
-            repetition: true,
-        });
-    }
-}
-
-/// A single iterative parsing step.
-#[derive(Clone, Copy, Debug)]
-struct TinyParseFn<'code> {
-    parse: fn(
-        state: &mut TinyParseState<'code>,
-        expect: Expect,
-        field: usize,
-        repetition: bool,
-    ) -> TinyResult<()>,
-    expect: Expect,
-    field: usize,
-    repetition: bool,
-}
-
-impl<'code> TinyParseFn<'code> {
-    /// Calls the `parse` function.
-    fn parse(self, state: &mut TinyParseState<'code>) -> TinyResult<()> {
-        (self.parse)(state, self.expect, self.field, self.repetition)
-    }
-}
-
-/// Implementation detail for [`TinyParse`].
-pub(crate) trait TinyParseImpl: ParseImpl + Sized {
+pub(crate) trait ParseFastImpl: Sized {
     /// Used by [`TinyParse::tiny_parse_fast()`].
-    fn tiny_parse_nested(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<Self>;
-
-    /// Used by [`TinyParse::tiny_parse_safe()`].
-    fn tiny_parse_iterative(
-        state: &mut TinyParseState,
-        expect: Expect,
-        field: usize,
-        repetition: bool,
-    ) -> TinyResult<()>;
-
-    /// Used at the very end to pop the last node from the node stack.
-    fn pop_final_node(nodes: &mut NodeStack<Tiny>) -> Self;
+    fn parse_nested(lexer: &mut CheckedLexer<Tiny>, expect: Expect) -> Result<Self, TinyError>;
 }
 
-/// Allows parsing both fast (recursively; might stack overflow) and safe (iteratively).
-pub(crate) trait TinyParse: TinyParseImpl {
+/// Allows parsing recursively, which might stack overflow.
+pub(crate) trait ParseFast: ParseImpl<Tiny> + ParseFastImpl {
     /// Parses recursively.
     ///
     /// This is very fast, but might lead to a stack overflow for deeply nested code. To avoid
-    /// crashes for e.g. untrusted input, use [`TinyParse::tiny_parse_safe()`].
+    /// crashes for e.g. untrusted input, use [`parser::Parse::parse()`].
     ///
     /// One could add a `max_recursion` limit here, but that can't really provide any guarantees,
     /// since the stack might already be almost full despite a low limit.
@@ -124,34 +28,14 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
     /// this again in the future, but for now I'll keep it as is.
-    fn tiny_parse_fast(code: &str) -> TinyResult<Self> {
+    fn parse_fast(code: &str) -> Result<Self, TinyError> {
         let lexer = TinyLexer::new(code);
-        let mut lexer = CheckedTinyLexer::new(lexer, Self::INITIAL_EXPECT)?;
-        Self::tiny_parse_nested(&mut lexer, Expect::END_OF_INPUT)
-    }
-
-    /// Parses iteratively rather than recursively to avoid stack overflow.
-    ///
-    /// Keep in mind, that you might also want to limit the size of the input to some maximum to
-    /// also effectively limit its execution time, so that it doesn't hang up the program.
-    /// Furthermore, since tokens can be arbitrarily large, limit the actual input, not just the
-    /// number of tokens.
-    fn tiny_parse_safe(code: &str) -> TinyResult<Self> {
-        let lexer = TinyLexer::new(code);
-        let lexer = CheckedTinyLexer::new(lexer, Self::INITIAL_EXPECT)?;
-        let mut state = TinyParseState::new(lexer);
-        Self::tiny_parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
-        while let Some(parser) = state.parsers.pop() {
-            parser.parse(&mut state)?;
-        }
-        assert!(state.tokens.finish(), "token stack should be empty");
-        let result = Self::pop_final_node(&mut state.nodes);
-        assert!(state.nodes.finish(), "node stack should be empty");
-        Ok(result)
+        let mut lexer = CheckedLexer::new(lexer, Self::INITIAL_EXPECT)?;
+        Self::parse_nested(&mut lexer, Expect::END_OF_INPUT)
     }
 }
 
-impl<T: TinyParseImpl> TinyParse for T {}
+impl<T: ParseImpl<Tiny> + ParseFastImpl> ParseFast for T {}
 
 /// A stack of tokens which might be optionals or repetitions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -169,14 +53,9 @@ pub(crate) struct TinyTokenStack {
 }
 
 impl TinyTokenStack {
-    /// Creates an empty stack.
-    fn new() -> Self {
-        Self::default()
-    }
-
     /// Consumes [`self`] and returns if the stack is empty, which should always be the case at the
     /// end of parsing.
-    fn finish(self) -> bool {
+    pub(crate) fn finish(self) -> bool {
         self.dynamic_tokens.is_empty()
             && self.optionals.is_empty()
             && self.fixed_repetitions.is_empty()

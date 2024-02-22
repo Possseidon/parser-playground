@@ -1,13 +1,13 @@
-use std::{mem::replace, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 
 use thiserror::Error;
 
 use crate::{
     lexer::{
         lex_char_or_label, lex_doc_comment, lex_integer_or_float, lex_keyword_or_ident, lex_quoted,
-        lex_raw_string, trim_whitespace, Unterminated,
+        lex_raw_string, trim_whitespace, LexerToken, Unterminated,
     },
-    token::{Expect, FixedTokenKind, TokenKind, TokenSet},
+    token::{Expect, FixedTokenKind, Positioned, TokenKind},
 };
 
 #[derive(Debug)]
@@ -21,7 +21,11 @@ impl<'code> PositionedLexer<'code> {
         Self { code, pos: 0 }
     }
 
-    pub(crate) fn next_token(&mut self) -> Result<PositionedLexerToken, LexerError> {
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn next_token(&mut self) -> Result<LexerToken<Positioned>, LexerError> {
         let rest = &self.code[self.pos..];
         let (kind, len) = if let Some(kind_len) = lex_doc_comment(rest) {
             kind_len
@@ -43,18 +47,16 @@ impl<'code> PositionedLexer<'code> {
             return Err(LexerError::InvalidChar);
         };
 
-        let span = TokenSpan {
-            pos: self.pos,
-            len: NonZeroUsize::new(len).expect("token should not be empty"),
-        };
-
         self.pos += len;
-        Ok(PositionedLexerToken { kind, span })
+        Ok(LexerToken {
+            kind,
+            token: NonZeroUsize::new(len).expect("token should not be empty"),
+        })
     }
 }
 
 impl Iterator for PositionedLexer<'_> {
-    type Item = Result<PositionedLexerToken, PositionedLexerError>;
+    type Item = Result<LexerToken<Positioned>, PositionedLexerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let pos = self.pos;
@@ -78,96 +80,32 @@ impl Iterator for PositionedLexer<'_> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PositionedLexerToken {
-    span: TokenSpan,
-    kind: TokenKind,
+pub(crate) struct TokenSpan {
+    pub(crate) pos: usize,
+    pub(crate) len: NonZeroUsize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TokenSpan {
-    pos: usize,
-    len: NonZeroUsize,
+pub(crate) enum OptionalTokenSpan {
+    Some(TokenSpan),
+    None { pos: usize },
 }
 
-#[derive(Debug)]
-pub(crate) struct CheckedPositionedLexer<'code> {
-    lexer: PositionedLexer<'code>,
-    current_kind: Option<TokenKind>,
-    next_token: TokenSpan,
-}
-
-impl<'code> CheckedPositionedLexer<'code> {
-    pub(crate) fn new(
-        lexer: PositionedLexer<'code>,
-        expect: Expect,
-    ) -> Result<Self, PositionedLexerError> {
-        let mut result = Self {
-            lexer,
-            // arbitrary current_kind and next_token; both will be replaced immediately
-            current_kind: None,
-            next_token: TokenSpan {
-                pos: 0,
-                len: NonZeroUsize::MIN,
-            },
-        };
-        result.next(expect)?;
-        Ok(result)
-    }
-
-    pub(crate) fn kind(&self) -> TokenKind {
-        self.current_kind.expect("token kind should be set")
-    }
-
-    pub(crate) fn matches(&self, tokens: TokenSet) -> bool {
-        self.current_kind.is_some_and(|kind| tokens.contains(kind))
-    }
-
-    /// Yields a token from the stream while also making sure the token afterwards matches `expect`.
-    pub(crate) fn next(&mut self, expect: Expect) -> Result<TokenSpan, PositionedLexerError> {
-        if let Some(next_token) = self.lexer.next() {
-            let next_token = next_token?;
-            if expect.tokens.contains(next_token.kind) {
-                self.current_kind = Some(next_token.kind);
-                Ok(replace(&mut self.next_token, next_token.span))
-            } else {
-                Err(PositionedLexerError {
-                    pos: next_token.span.pos,
-                    kind: LexerError::UnexpectedToken {
-                        expected: expect,
-                        found: Some(next_token.kind),
-                    },
-                })
-            }
-        } else if expect.or_end_of_input {
-            self.current_kind = None;
-            // will never be read again
-            Ok(self.next_token)
-        } else {
-            Err(PositionedLexerError {
-                pos: self.lexer.pos,
-                kind: LexerError::UnexpectedToken {
-                    expected: expect,
-                    found: None,
-                },
-            })
-        }
-    }
-}
-
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PositionedLexerError {
     pub(crate) pos: usize,
     pub(crate) kind: LexerError,
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub(crate) enum LexerError {
     #[error(transparent)]
     Unterminated(#[from] Unterminated),
     #[error("invalid character")]
     InvalidChar,
-    #[error("{expected:?} expected, found {found:?}")]
+    #[error("{expect:?} expected, found {found:?}")]
     UnexpectedToken {
-        expected: Expect,
+        expect: Expect,
         found: Option<TokenKind>,
     },
 }
