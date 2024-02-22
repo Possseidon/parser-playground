@@ -55,12 +55,6 @@ impl<'code> TinyLexer<'code> {
     }
 }
 
-impl<'code> From<&'code str> for TinyLexer<'code> {
-    fn from(code: &'code str) -> Self {
-        Self::new(code)
-    }
-}
-
 impl Iterator for TinyLexer<'_> {
     type Item = TinyResult<TinyLexerToken>;
 
