@@ -4,18 +4,17 @@ use smol_str::SmolStr;
 
 use crate::{
     parser::{NodeStack, ParseImpl},
-    tiny::{
-        lexer::{CheckedTinyTokenStream, TinyTokenStream},
-        TinyResult,
-    },
+    tiny::{lexer::CheckedTinyLexer, TinyResult},
     token::{Expect, Tiny},
 };
 
+use super::lexer::TinyLexer;
+
 /// A single iterative parsing step.
 #[derive(Clone, Copy, Debug)]
-struct TinyParseFn<T: TinyTokenStream> {
+struct TinyParseFn<'code> {
     parse: fn(
-        state: &mut TinyParseState<T>,
+        state: &mut TinyParseState<'code>,
         expect: Expect,
         field: usize,
         repetition: bool,
@@ -25,9 +24,9 @@ struct TinyParseFn<T: TinyTokenStream> {
     repetition: bool,
 }
 
-impl<T: TinyTokenStream> TinyParseFn<T> {
+impl<'code> TinyParseFn<'code> {
     /// Calls the `parse` function.
-    fn parse(self, state: &mut TinyParseState<T>) -> TinyResult<()> {
+    fn parse(self, state: &mut TinyParseState<'code>) -> TinyResult<()> {
         (self.parse)(state, self.expect, self.field, self.repetition)
     }
 }
@@ -36,19 +35,19 @@ impl<T: TinyTokenStream> TinyParseFn<T> {
 ///
 /// Consists of a token stream and stacks for parsing steps, tokens and nodes.
 #[derive(Debug)]
-pub(crate) struct TinyParseState<T: TinyTokenStream> {
-    parsers: Vec<TinyParseFn<T>>,
-    pub(crate) token_stream: CheckedTinyTokenStream<T>,
+pub(crate) struct TinyParseState<'code> {
+    parsers: Vec<TinyParseFn<'code>>,
+    pub(crate) lexer: CheckedTinyLexer<'code>,
     pub(crate) tokens: TinyTokenStack,
     pub(crate) nodes: NodeStack<Tiny>,
 }
 
-impl<T: TinyTokenStream> TinyParseState<T> {
+impl<'code> TinyParseState<'code> {
     /// Creates a new parsing state from a token stream.
-    pub(crate) fn new(token_stream: CheckedTinyTokenStream<T>) -> Self {
+    pub(crate) fn new(lexer: CheckedTinyLexer<'code>) -> Self {
         Self {
             parsers: Vec::new(),
-            token_stream,
+            lexer,
             tokens: TinyTokenStack::new(),
             nodes: NodeStack::new(),
         }
@@ -98,14 +97,11 @@ impl<T: TinyTokenStream> TinyParseState<T> {
 /// Implementation detail for [`TinyParse`].
 pub(crate) trait TinyParseImpl: ParseImpl + Sized {
     /// Used by [`TinyParse::tiny_parse_fast()`].
-    fn tiny_parse_nested(
-        token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>,
-        expect: Expect,
-    ) -> TinyResult<Self>;
+    fn tiny_parse_nested(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<Self>;
 
     /// Used by [`TinyParse::tiny_parse_safe()`].
     fn tiny_parse_iterative(
-        state: &mut TinyParseState<impl TinyTokenStream>,
+        state: &mut TinyParseState,
         expect: Expect,
         field: usize,
         repetition: bool,
@@ -128,9 +124,10 @@ pub(crate) trait TinyParse: TinyParseImpl {
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
     /// this again in the future, but for now I'll keep it as is.
-    fn tiny_parse_fast(token_stream: impl TinyTokenStream) -> TinyResult<Self> {
-        let mut token_stream = CheckedTinyTokenStream::new(token_stream, Self::INITIAL_EXPECT)?;
-        Self::tiny_parse_nested(&mut token_stream, Expect::END_OF_INPUT)
+    fn tiny_parse_fast(code: &str) -> TinyResult<Self> {
+        let lexer = TinyLexer::new(code);
+        let mut lexer = CheckedTinyLexer::new(lexer, Self::INITIAL_EXPECT)?;
+        Self::tiny_parse_nested(&mut lexer, Expect::END_OF_INPUT)
     }
 
     /// Parses iteratively rather than recursively to avoid stack overflow.
@@ -140,11 +137,10 @@ pub(crate) trait TinyParse: TinyParseImpl {
     ///
     /// Furthermore, since tokens can be arbitrarily large, limit the actual input, not just the
     /// number of tokens.
-    fn tiny_parse_safe(token_stream: impl TinyTokenStream) -> TinyResult<Self> {
-        let mut state = TinyParseState::new(CheckedTinyTokenStream::new(
-            token_stream,
-            Self::INITIAL_EXPECT,
-        )?);
+    fn tiny_parse_safe(code: &str) -> TinyResult<Self> {
+        let lexer = TinyLexer::new(code);
+        let lexer = CheckedTinyLexer::new(lexer, Self::INITIAL_EXPECT)?;
+        let mut state = TinyParseState::new(lexer);
         Self::tiny_parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
         while let Some(parser) = state.parsers.pop() {
             parser.parse(&mut state)?;

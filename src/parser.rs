@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use crate::{
     push_array::PushArray,
     tiny::{
-        lexer::{CheckedTinyTokenStream, TinyTokenStream},
+        lexer::CheckedTinyLexer,
         parser::{TinyParseImpl, TinyParseState},
         TinyResult,
     },
@@ -28,17 +28,17 @@ pub(crate) trait ParseImpl {
 
 /// Recursively parses a node.
 macro_rules! tiny_parse_node {
-    ( $Node:ident $token_stream:ident $expect:tt ) => {
-        $Node::<Tiny>::tiny_parse_nested($token_stream, $expect)?
+    ( $Node:ident $lexer:ident $expect:tt ) => {
+        $Node::<Tiny>::tiny_parse_nested($lexer, $expect)?
     };
 }
 
 /// Recursively parses a repetition of nodes.
 macro_rules! tiny_parse_node_repetition {
-    ( $Vec:ident $Node:ident $token_stream:ident $expect:tt ) => { {
+    ( $Vec:ident $Node:ident $lexer:ident $expect:tt ) => { {
         let mut result = $Vec::new();
-        while $token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
-            result.push(tiny_parse_node!($Node $token_stream $expect));
+        while $lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
+            result.push(tiny_parse_node!($Node $lexer $expect));
         }
         result
     } };
@@ -46,32 +46,32 @@ macro_rules! tiny_parse_node_repetition {
 
 /// Recursively parses a single field of a concatenation.
 macro_rules! tiny_parse_by_mode {
-    ( [$Token:ident] $token_stream:ident $expect:tt ) => {
-        tokens::$Token::parse_required($token_stream, $expect)?
+    ( [$Token:ident] $lexer:ident $expect:tt ) => {
+        tokens::$Token::parse_required($lexer, $expect)?
     };
-    ( [$Token:ident?] $token_stream:ident $expect:tt ) => {
-        tokens::$Token::parse_optional($token_stream, $expect)?
+    ( [$Token:ident?] $lexer:ident $expect:tt ) => {
+        tokens::$Token::parse_optional($lexer, $expect)?
     };
-    ( [$Token:ident*] $token_stream:ident $expect:tt ) => {
-        tokens::$Token::parse_repetition($token_stream, $expect)?
+    ( [$Token:ident*] $lexer:ident $expect:tt ) => {
+        tokens::$Token::parse_repetition($lexer, $expect)?
     };
-    ( ($Node:ident) $token_stream:ident $expect:tt ) => {
-        tiny_parse_node!($Node $token_stream $expect)
+    ( ($Node:ident) $lexer:ident $expect:tt ) => {
+        tiny_parse_node!($Node $lexer $expect)
     };
-    ( ($Node:ident[]) $token_stream:ident $expect:tt ) => {
-        Box::new(tiny_parse_node!($Node $token_stream $expect))
+    ( ($Node:ident[]) $lexer:ident $expect:tt ) => {
+        Box::new(tiny_parse_node!($Node $lexer $expect))
     };
-    ( ($Node:ident?) $token_stream:ident $expect:tt ) => {
-        if $token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(tiny_parse_node!($Node $token_stream $expect)) } else { None }
+    ( ($Node:ident?) $lexer:ident $expect:tt ) => {
+        if $lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(tiny_parse_node!($Node $lexer $expect)) } else { None }
     };
-    ( ($Node:ident[?]) $token_stream:ident $expect:tt ) => {
-        if $token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(Box::new(tiny_parse_node!($Node $token_stream $expect))) } else { None }
+    ( ($Node:ident[?]) $lexer:ident $expect:tt ) => {
+        if $lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(Box::new(tiny_parse_node!($Node $lexer $expect))) } else { None }
     };
-    ( ($Node:ident*) $token_stream:ident $expect:tt ) => {
-        tiny_parse_node_repetition!(SmallVec $Node $token_stream $expect)
+    ( ($Node:ident*) $lexer:ident $expect:tt ) => {
+        tiny_parse_node_repetition!(SmallVec $Node $lexer $expect)
     };
-    ( ($Node:ident[*]) $token_stream:ident $expect:tt ) => {
-        tiny_parse_node_repetition!(Vec $Node $token_stream $expect)
+    ( ($Node:ident[*]) $lexer:ident $expect:tt ) => {
+        tiny_parse_node_repetition!(Vec $Node $lexer $expect)
     };
 }
 
@@ -81,7 +81,7 @@ macro_rules! tiny_parse_node_repetition_iterative {
         if !$repetition {
             NodeStack::<Tiny>::start_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]);
         }
-        if $state.token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
+        if $state.lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
             $state.push_repetition::<Self>($original_expect, $field);
             $state.push_parser::<$Node<Tiny>>($expect);
         }
@@ -103,7 +103,7 @@ macro_rules! tiny_parse_by_mode_iterative {
         $state.push_parser::<$Node<Tiny>>($expect);
     };
     ( ($Node:ident?) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
-        if $state.token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
+        if $state.lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
             $state.nodes.push_some();
             $state.push_parser::<$Node<Tiny>>($expect);
         } else {
@@ -111,7 +111,7 @@ macro_rules! tiny_parse_by_mode_iterative {
         }
     };
     ( ($Node:ident[?]) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
-        if $state.token_stream.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
+        if $state.lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
             $state.nodes.push_some();
             $state.push_parser::<$Node<Tiny>>($expect);
         } else {
@@ -457,14 +457,14 @@ macro_rules! impl_struct_parse {
         }
 
         impl TinyParseImpl for $Name<Tiny> {
-            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<Self> {
+            fn tiny_parse_nested(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<Self> {
                 Ok(Self { $( $field: {
-                    tiny_parse_by_mode!($Field token_stream { expect_field!($Field $Name $field expect) })
+                    tiny_parse_by_mode!($Field lexer { expect_field!($Field $Name $field expect) })
                 }, )* })
             }
 
             fn tiny_parse_iterative(
-                state: &mut TinyParseState<impl TinyTokenStream>,
+                state: &mut TinyParseState,
                 expect: Expect,
                 field: usize,
                 repetition: bool,
@@ -587,22 +587,22 @@ macro_rules! impl_enum_parse {
         }
 
         impl TinyParseImpl for $Name<Tiny> {
-            fn tiny_parse_nested(token_stream: &mut CheckedTinyTokenStream<impl TinyTokenStream>, expect: Expect) -> TinyResult<Self> {
-                let found = token_stream.kind();
+            fn tiny_parse_nested(lexer: &mut CheckedTinyLexer, expect: Expect) -> TinyResult<Self> {
+                let found = lexer.kind();
 
                 $( if found == TokenKind::$Token {
-                    return Ok(Self::$Token(tokens::$Token::parse_required(token_stream, expect)?));
+                    return Ok(Self::$Token(tokens::$Token::parse_required(lexer, expect)?));
                 } )*
 
                 $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    return Ok(Self::$Node(box_variant_if!({$Node::<Tiny>::tiny_parse_nested(token_stream, expect)?} $( $mode )? )));
+                    return Ok(Self::$Node(box_variant_if!({$Node::<Tiny>::tiny_parse_nested(lexer, expect)?} $( $mode )? )));
                 } )*
 
                 unreachable!("token should match one of the above cases");
             }
 
             fn tiny_parse_iterative(
-                state: &mut TinyParseState<impl TinyTokenStream>,
+                state: &mut TinyParseState,
                 expect: Expect,
                 field: usize,
                 _repetition: bool,
@@ -619,10 +619,10 @@ macro_rules! impl_enum_parse {
                     return Ok(());
                 }
 
-                let found = state.token_stream.kind();
+                let found = state.lexer.kind();
 
                 $( if found == TokenKind::$Token {
-                    state.nodes.[<$Name:snake>].push(Self::$Token(tokens::$Token::parse_required(&mut state.token_stream, expect)?));
+                    state.nodes.[<$Name:snake>].push(Self::$Token(tokens::$Token::parse_required(&mut state.lexer, expect)?));
                     return Ok(());
                 } )*
 

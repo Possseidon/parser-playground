@@ -58,7 +58,7 @@ impl<'code> TinyLexer<'code> {
 
 impl<'code> From<&'code str> for TinyLexer<'code> {
     fn from(code: &'code str) -> Self {
-        Self { code }
+        Self::new(code)
     }
 }
 
@@ -85,22 +85,18 @@ pub(crate) struct TinyLexerToken {
     text: SmolStr,
 }
 
-pub(crate) trait TinyTokenStream: Iterator<Item = TinyResult<TinyLexerToken>> {}
-
-impl<T: Iterator<Item = TinyResult<TinyLexerToken>>> TinyTokenStream for T {}
-
-/// A [`TinyTokenStream`] that also makes sure the next token matches what is [`Expect`]ed.
+/// A [`TinyLexer`] that also makes sure the next token matches what is [`Expect`]ed.
 #[derive(Debug)]
-pub(crate) struct CheckedTinyTokenStream<T: TinyTokenStream> {
-    token_stream: T,
+pub(crate) struct CheckedTinyLexer<'code> {
+    lexer: TinyLexer<'code>,
     current_kind: Option<TokenKind>,
     next_token: SmolStr,
 }
 
-impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
-    pub(crate) fn new(token_stream: T, expect: Expect) -> TinyResult<Self> {
+impl<'code> CheckedTinyLexer<'code> {
+    pub(crate) fn new(lexer: TinyLexer<'code>, expect: Expect) -> TinyResult<Self> {
         let mut result = Self {
-            token_stream,
+            lexer,
             current_kind: None,
             next_token: SmolStr::default(),
         };
@@ -118,7 +114,7 @@ impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
 
     /// Yields a token from the stream while also making sure the token afterwards matches `expect`.
     pub(crate) fn next(&mut self, expect: Expect) -> TinyResult<SmolStr> {
-        if let Some(next_token) = self.token_stream.next() {
+        if let Some(next_token) = self.lexer.next() {
             let next_token = next_token?;
             if expect.tokens.contains(next_token.kind) {
                 self.current_kind = Some(next_token.kind);
