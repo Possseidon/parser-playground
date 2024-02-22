@@ -462,10 +462,21 @@ impl TokenSet {
 /// A full set of what to expected as the next token.
 ///
 /// In addition to expecting any kind of node, it can also expect the end of the input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Expect {
     pub(crate) tokens: TokenSet,
     pub(crate) or_end_of_input: bool,
+}
+
+impl fmt::Debug for Expect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = f.debug_list();
+        list.entries(self.tokens.tokens());
+        if self.or_end_of_input {
+            list.entry(&"END_OF_INPUT");
+        }
+        list.finish()
+    }
 }
 
 impl Expect {
