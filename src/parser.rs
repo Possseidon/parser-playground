@@ -861,7 +861,7 @@ impl<S: Style> NodeStack<S> {
     /// Marks the start of a new repetition of a specific kind of node.
     ///
     /// `repetition` is passed in manually to avoid multiple mutable borrows to `self`.
-    fn start_repetition<T>(repetition: &mut Repetition, fields: &Vec<T>) {
+    fn start_repetition<T>(repetition: &mut Repetition, fields: &[T]) {
         repetition.push(fields.len());
     }
 
