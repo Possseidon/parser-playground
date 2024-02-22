@@ -44,15 +44,14 @@ impl<'code> TinyLexer<'code> {
             return Err(TinyError);
         };
 
+        let text = if kind.is_dynamic() {
+            self.code[..len].into()
+        } else {
+            SmolStr::default()
+        };
+
         self.code = &self.code[len..];
-        Ok(TinyLexerToken {
-            kind,
-            text: if kind.is_dynamic() {
-                self.code[..len].into()
-            } else {
-                SmolStr::default()
-            },
-        })
+        Ok(TinyLexerToken { kind, text })
     }
 }
 
