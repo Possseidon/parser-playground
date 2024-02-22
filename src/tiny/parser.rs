@@ -10,30 +10,9 @@ use crate::{
 
 use super::lexer::TinyLexer;
 
-/// A single iterative parsing step.
-#[derive(Clone, Copy, Debug)]
-struct TinyParseFn<'code> {
-    parse: fn(
-        state: &mut TinyParseState<'code>,
-        expect: Expect,
-        field: usize,
-        repetition: bool,
-    ) -> TinyResult<()>,
-    expect: Expect,
-    field: usize,
-    repetition: bool,
-}
-
-impl<'code> TinyParseFn<'code> {
-    /// Calls the `parse` function.
-    fn parse(self, state: &mut TinyParseState<'code>) -> TinyResult<()> {
-        (self.parse)(state, self.expect, self.field, self.repetition)
-    }
-}
-
 /// The state of an iterative parsing process.
 ///
-/// Consists of a token stream and stacks for parsing steps, tokens and nodes.
+/// Consists of a lexer and stacks for parsing steps, tokens and nodes.
 #[derive(Debug)]
 pub(crate) struct TinyParseState<'code> {
     parsers: Vec<TinyParseFn<'code>>,
@@ -43,7 +22,7 @@ pub(crate) struct TinyParseState<'code> {
 }
 
 impl<'code> TinyParseState<'code> {
-    /// Creates a new parsing state from a token stream.
+    /// Creates a new parsing state from a lexer.
     pub(crate) fn new(lexer: CheckedTinyLexer<'code>) -> Self {
         Self {
             parsers: Vec::new(),
@@ -94,6 +73,27 @@ impl<'code> TinyParseState<'code> {
     }
 }
 
+/// A single iterative parsing step.
+#[derive(Clone, Copy, Debug)]
+struct TinyParseFn<'code> {
+    parse: fn(
+        state: &mut TinyParseState<'code>,
+        expect: Expect,
+        field: usize,
+        repetition: bool,
+    ) -> TinyResult<()>,
+    expect: Expect,
+    field: usize,
+    repetition: bool,
+}
+
+impl<'code> TinyParseFn<'code> {
+    /// Calls the `parse` function.
+    fn parse(self, state: &mut TinyParseState<'code>) -> TinyResult<()> {
+        (self.parse)(state, self.expect, self.field, self.repetition)
+    }
+}
+
 /// Implementation detail for [`TinyParse`].
 pub(crate) trait TinyParseImpl: ParseImpl + Sized {
     /// Used by [`TinyParse::tiny_parse_fast()`].
@@ -134,7 +134,6 @@ pub(crate) trait TinyParse: TinyParseImpl {
     ///
     /// Keep in mind, that you might also want to limit the size of the input to some maximum to
     /// also effectively limit its execution time, so that it doesn't hang up the program.
-    ///
     /// Furthermore, since tokens can be arbitrarily large, limit the actual input, not just the
     /// number of tokens.
     fn tiny_parse_safe(code: &str) -> TinyResult<Self> {
