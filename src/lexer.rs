@@ -2,13 +2,15 @@ use thiserror::Error;
 
 use crate::token::{FixedTokenKind, TokenKind};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Error)]
-#[error("mismatched quotes")]
-pub(crate) struct MismatchedQuotes;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Error)]
-#[error("unterminated block comment")]
-pub(crate) struct UnterminatedBlockComment;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub(crate) enum Unterminated {
+    #[error("unterminated block comment")]
+    BlockComment,
+    #[error("unterminated string literal")]
+    String,
+    #[error("unterminated char literal")]
+    Char,
+}
 
 /// Lexes a doc comment, returning the token kind and the length of the token.
 pub(crate) fn lex_doc_comment(rest: &str) -> Option<(TokenKind, usize)> {
@@ -83,9 +85,7 @@ pub(crate) fn lex_integer_or_float(rest: &str) -> Option<(TokenKind, usize)> {
 /// ```
 ///
 /// Reading from the truth table: `is_char = (ident chars) < 1 || (' after ident)`
-pub(crate) fn lex_char_or_label(
-    rest: &str,
-) -> Result<Option<(TokenKind, usize)>, MismatchedQuotes> {
+pub(crate) fn lex_char_or_label(rest: &str) -> Result<Option<(TokenKind, usize)>, Unterminated> {
     let Some(after_quote) = rest.strip_prefix('\'') else {
         return Ok(None);
     };
@@ -94,10 +94,8 @@ pub(crate) fn lex_char_or_label(
     let ident_chars = after_quote.len() - after_ident_chars.len();
     let quote_after_ident = after_ident_chars.starts_with('\'');
     Ok(if ident_chars < 1 || quote_after_ident {
-        Some((
-            TokenKind::Char,
-            rest.len() - lex_quoted_content(after_ident_chars, '\'')?.len(),
-        ))
+        let end = lex_quoted_content(after_ident_chars, '\'').ok_or(Unterminated::Char)?;
+        Some((TokenKind::Char, rest.len() - end.len()))
     } else {
         Some((TokenKind::Label, rest.len() - after_ident_chars.len()))
     })
@@ -106,21 +104,33 @@ pub(crate) fn lex_char_or_label(
 /// Lexes a quoted string or byte-string/char, returning the token kind and the length of the token.
 ///
 /// Regular chars are handled by [`lex_char_or_label`], since distingushing those is a bit tricky.
-pub(crate) fn lex_quoted(rest: &str) -> Result<Option<(TokenKind, usize)>, MismatchedQuotes> {
-    let (kind, after_quote, end_quote) = if let Some(after_quote) = rest.strip_prefix("b'") {
-        (TokenKind::Char, after_quote, '\'')
+pub(crate) fn lex_quoted(rest: &str) -> Result<Option<(TokenKind, usize)>, Unterminated> {
+    let (is_char, after_quote) = if let Some(after_quote) = rest.strip_prefix("b'") {
+        (true, after_quote)
     } else if let Some(after_quote) = rest.strip_prefix('"').or_else(|| rest.strip_prefix("b\"")) {
-        (TokenKind::String, after_quote, '"')
+        (false, after_quote)
     } else {
         return Ok(None);
     };
 
-    let end = lex_quoted_content(after_quote, end_quote)?;
-    Ok(Some((kind, rest.len() - end.len())))
+    let end =
+        lex_quoted_content(after_quote, if is_char { '\'' } else { '"' }).ok_or(if is_char {
+            Unterminated::Char
+        } else {
+            Unterminated::String
+        })?;
+    Ok(Some((
+        if is_char {
+            TokenKind::Char
+        } else {
+            TokenKind::String
+        },
+        rest.len() - end.len(),
+    )))
 }
 
 /// Lexes a raw string or byte-string, returning the token kind and the length of the token.
-pub(crate) fn lex_raw_string(rest: &str) -> Result<Option<(TokenKind, usize)>, MismatchedQuotes> {
+pub(crate) fn lex_raw_string(rest: &str) -> Result<Option<(TokenKind, usize)>, Unterminated> {
     let after_r = if rest.starts_with("r#") || rest.starts_with("r\"") {
         &rest[1..]
     } else if rest.starts_with("br#") || rest.starts_with("br\"") {
@@ -131,7 +141,7 @@ pub(crate) fn lex_raw_string(rest: &str) -> Result<Option<(TokenKind, usize)>, M
 
     let after_pound = after_r.trim_start_matches('#');
     let start_pounds = &after_r[0..after_r.len() - after_pound.len()];
-    let mut after_quote = after_pound.strip_prefix('"').ok_or(MismatchedQuotes)?;
+    let mut after_quote = after_pound.strip_prefix('"').ok_or(Unterminated::String)?;
     loop {
         if let Some(end_pounds) = after_quote
             .trim_start_matches(|c: char| c != '"')
@@ -142,7 +152,7 @@ pub(crate) fn lex_raw_string(rest: &str) -> Result<Option<(TokenKind, usize)>, M
             }
             after_quote = end_pounds;
         } else {
-            break Err(MismatchedQuotes);
+            break Err(Unterminated::String);
         }
     }
 }
@@ -165,34 +175,31 @@ pub(crate) fn lex_keyword_or_ident(rest: &str) -> Option<(TokenKind, usize)> {
     )
 }
 
-/// Advances `pos` over whitespace characters and returns `true` if the end of input was reached.
-///
-/// Whitespace also includes comments (except for doc-comments).
-pub(crate) fn lex_whitespace(
-    code: &str,
-    pos: &mut usize,
-) -> Result<bool, UnterminatedBlockComment> {
+/// Trims whitespace (including comments) from the start of a string.
+pub(crate) fn trim_whitespace(mut code: &str) -> Result<&str, Unterminated> {
     loop {
-        match code[*pos..].bytes().next() {
-            None => break Ok(true),
+        match code.bytes().next() {
+            None => break Ok(""),
             Some(c) if c.is_ascii_whitespace() => {
-                *pos = code[*pos + 1..]
+                let pos = code[1..]
                     .find(|c: char| !c.is_ascii_whitespace())
-                    .map_or(code.len(), |len| *pos + len + 1);
+                    .map_or(code.len(), |len| len + 1);
+                code = &code[pos..];
             }
             Some(b'/') => {
-                if code[*pos + 1..].starts_with("//") {
-                    break Ok(false);
-                } else if code[*pos + 1..].starts_with('/') {
-                    *pos += 2 + find_line_break(&code[*pos + 2..]);
-                } else if code[*pos + 1..].starts_with('*') {
-                    let start_len = code[*pos..].len();
-                    let mut after_block_comment = &code[*pos + 2..];
+                if code[1..].starts_with("//") {
+                    // doc-comments are not considered whitespace
+                    break Ok(code);
+                }
+                if code[1..].starts_with('/') {
+                    code = &code[2 + find_line_break(&code[2..])..];
+                } else if code[1..].starts_with('*') {
+                    let start_len = code.len();
+                    let mut after_block_comment = &code[2..];
                     let mut nesting: usize = 0;
                     loop {
                         let Some(len) = after_block_comment.find("*/") else {
-                            *pos = code.len();
-                            return Err(UnterminatedBlockComment);
+                            return Err(Unterminated::BlockComment);
                         };
                         if let Some(open) = after_block_comment[..len].find("/*") {
                             after_block_comment = &after_block_comment[open + 2..];
@@ -200,34 +207,34 @@ pub(crate) fn lex_whitespace(
                         } else {
                             after_block_comment = &after_block_comment[len + 2..];
                             if nesting == 0 {
-                                *pos += start_len - after_block_comment.len();
+                                code = &code[start_len - after_block_comment.len()..];
                                 break;
                             }
                             nesting -= 1;
                         }
                     }
                 } else {
-                    break Ok(false);
+                    break Ok(code);
                 }
             }
-            _ => break Ok(false),
+            _ => break Ok(code),
         }
     }
 }
 
 /// Lexes the contents of something quoted, returning the rest of the string.
-fn lex_quoted_content(mut after_quote: &str, end_quote: char) -> Result<&str, MismatchedQuotes> {
+fn lex_quoted_content(mut after_quote: &str, end_quote: char) -> Option<&str> {
     loop {
         let quote_or_backslash =
             after_quote.trim_start_matches(|c: char| c != end_quote && c != '\\');
         if quote_or_backslash.is_empty() {
-            return Err(MismatchedQuotes);
+            return None;
         }
         if let Some(end) = quote_or_backslash.strip_prefix(end_quote) {
-            break Ok(end);
+            break Some(end);
         }
         let Some(after_escape) = quote_or_backslash.get(2..) else {
-            return Err(MismatchedQuotes);
+            return None;
         };
         after_quote = after_escape;
     }
@@ -284,8 +291,8 @@ mod tests {
     fn test_lex_char_or_label() {
         assert_eq!(lex_char_or_label(""), Ok(None));
         assert_eq!(lex_char_or_label("a"), Ok(None));
-        assert_eq!(lex_char_or_label("'"), Err(MismatchedQuotes));
-        assert_eq!(lex_char_or_label("'?"), Err(MismatchedQuotes));
+        assert_eq!(lex_char_or_label("'"), Err(Unterminated::Char));
+        assert_eq!(lex_char_or_label("'?"), Err(Unterminated::Char));
         assert_eq!(lex_char_or_label("'?'"), Ok(Some((TokenKind::Char, 3))));
         assert_eq!(lex_char_or_label("''"), Ok(Some((TokenKind::Char, 2))));
         assert_eq!(lex_char_or_label("'a"), Ok(Some((TokenKind::Label, 2))));
@@ -298,22 +305,24 @@ mod tests {
     fn test_lex_quoted() {
         assert_eq!(lex_quoted(""), Ok(None));
         assert_eq!(lex_quoted("a"), Ok(None));
-        assert_eq!(lex_quoted("\""), Err(MismatchedQuotes));
+        assert_eq!(lex_quoted("\""), Err(Unterminated::String));
         assert_eq!(lex_quoted("\"\""), Ok(Some((TokenKind::String, 2))));
         assert_eq!(lex_quoted("\"\"foo"), Ok(Some((TokenKind::String, 2))));
         assert_eq!(lex_quoted("\"\"\""), Ok(Some((TokenKind::String, 2))));
         assert_eq!(lex_quoted("\"nice\""), Ok(Some((TokenKind::String, 6))));
         assert_eq!(lex_quoted("\"nice\"foo"), Ok(Some((TokenKind::String, 6))));
-        assert_eq!(lex_quoted("\"\\\""), Err(MismatchedQuotes));
+        assert_eq!(lex_quoted("\"\\\""), Err(Unterminated::String));
         assert_eq!(lex_quoted("\"\\\"\""), Ok(Some((TokenKind::String, 4))));
         assert_eq!(lex_quoted("\"\\\"\"foo"), Ok(Some((TokenKind::String, 4))));
         assert_eq!(lex_quoted("\"\\\\\""), Ok(Some((TokenKind::String, 4))));
         assert_eq!(lex_quoted("\"\\\\\"foo"), Ok(Some((TokenKind::String, 4))));
 
         assert_eq!(lex_quoted("b\"bytes\""), Ok(Some((TokenKind::String, 8))));
-        assert_eq!(lex_quoted("b'X'"), Ok(Some((TokenKind::Char, 4)))); // X
+        assert_eq!(lex_quoted("b\"bytes"), Err(Unterminated::String));
+        assert_eq!(lex_quoted("b'X'"), Ok(Some((TokenKind::Char, 4))));
+        assert_eq!(lex_quoted("b'X"), Err(Unterminated::Char));
 
-        assert_eq!(lex_quoted("b'\"'"), Ok(Some((TokenKind::Char, 4)))); // X
+        assert_eq!(lex_quoted("b'\"'"), Ok(Some((TokenKind::Char, 4))));
         assert_eq!(lex_quoted("\"'\""), Ok(Some((TokenKind::String, 3))));
     }
 
@@ -323,17 +332,17 @@ mod tests {
         assert_eq!(lex_raw_string("a"), Ok(None));
 
         assert_eq!(lex_raw_string("r"), Ok(None));
-        assert_eq!(lex_raw_string("r\""), Err(MismatchedQuotes));
-        assert_eq!(lex_raw_string("r#\""), Err(MismatchedQuotes));
-        assert_eq!(lex_raw_string("r###\""), Err(MismatchedQuotes));
+        assert_eq!(lex_raw_string("r\""), Err(Unterminated::String));
+        assert_eq!(lex_raw_string("r#\""), Err(Unterminated::String));
+        assert_eq!(lex_raw_string("r###\""), Err(Unterminated::String));
         assert_eq!(lex_raw_string("rb"), Ok(None));
         assert_eq!(lex_raw_string("rb\""), Ok(None));
 
         assert_eq!(lex_raw_string("b"), Ok(None));
         assert_eq!(lex_raw_string("br"), Ok(None));
-        assert_eq!(lex_raw_string("br\""), Err(MismatchedQuotes));
-        assert_eq!(lex_raw_string("br#\""), Err(MismatchedQuotes));
-        assert_eq!(lex_raw_string("br###\""), Err(MismatchedQuotes));
+        assert_eq!(lex_raw_string("br\""), Err(Unterminated::String));
+        assert_eq!(lex_raw_string("br#\""), Err(Unterminated::String));
+        assert_eq!(lex_raw_string("br###\""), Err(Unterminated::String));
 
         assert_eq!(lex_raw_string("r\"foo\""), Ok(Some((TokenKind::String, 6))));
         assert_eq!(
@@ -373,43 +382,37 @@ mod tests {
     }
 
     #[test]
-    fn test_lex_whitespace() {
-        fn test(code: &str, expected_pos: usize, result: Result<bool, UnterminatedBlockComment>) {
-            let mut pos = 0;
-            assert_eq!(lex_whitespace(code, &mut pos), result);
-            assert_eq!(pos, expected_pos);
-        }
-
-        test("", 0, Ok(true));
-        test("foo", 0, Ok(false));
-        test(" \n\t", 3, Ok(true));
-        test(" \n\tfoo", 3, Ok(false));
-        test("// foo", 6, Ok(true));
-        test("// foo\n", 7, Ok(true));
-        test("// foo\nbar", 7, Ok(false));
-        test("/// foo", 0, Ok(false));
-        test("/*foo bar*/", 11, Ok(true));
-        test("/*foo bar*/bar", 11, Ok(false));
-        test("/*/", 3, Err(UnterminatedBlockComment));
-        test("/*/**/", 6, Err(UnterminatedBlockComment));
-        test("/*/**/*/", 8, Ok(true));
-        test("/*/**/*/foo", 8, Ok(false));
-        test("/**/", 4, Ok(true));
-        test("/**/foo", 4, Ok(false));
+    fn test_trim_whitespace() {
+        assert_eq!(trim_whitespace(""), Ok(""));
+        assert_eq!(trim_whitespace("foo"), Ok("foo"));
+        assert_eq!(trim_whitespace(" \n\t"), Ok(""));
+        assert_eq!(trim_whitespace(" \n\tfoo"), Ok("foo"));
+        assert_eq!(trim_whitespace("// foo"), Ok(""));
+        assert_eq!(trim_whitespace("// foo\n"), Ok(""));
+        assert_eq!(trim_whitespace("// foo\nbar"), Ok("bar"));
+        assert_eq!(trim_whitespace("/// foo"), Ok("/// foo"));
+        assert_eq!(trim_whitespace("/*foo bar*/"), Ok(""));
+        assert_eq!(trim_whitespace("/*foo bar*/bar"), Ok("bar"));
+        assert_eq!(trim_whitespace("/*/"), Err(Unterminated::BlockComment));
+        assert_eq!(trim_whitespace("/*/**/"), Err(Unterminated::BlockComment));
+        assert_eq!(trim_whitespace("/*/**/*/"), Ok(""));
+        assert_eq!(trim_whitespace("/*/**/*/foo"), Ok("foo"));
+        assert_eq!(trim_whitespace("/**/"), Ok(""));
+        assert_eq!(trim_whitespace("/**/foo"), Ok("foo"));
     }
 
     #[test]
     fn test_lex_quoted_content() {
-        assert_eq!(lex_quoted_content("", '"'), Err(MismatchedQuotes));
-        assert_eq!(lex_quoted_content("\"", '"'), Ok(""));
-        assert_eq!(lex_quoted_content("\"foo", '"'), Ok("foo"));
-        assert_eq!(lex_quoted_content("foo\"bar", '"'), Ok("bar"));
-        assert_eq!(lex_quoted_content("foo\"", '"'), Ok(""));
-        assert_eq!(lex_quoted_content("foo\\\"", '"'), Err(MismatchedQuotes));
-        assert_eq!(lex_quoted_content("foo\\\"bar", '"'), Err(MismatchedQuotes));
-        assert_eq!(lex_quoted_content("foo\\\\\"", '"'), Ok(""));
-        assert_eq!(lex_quoted_content("foo\\\\\"bar", '"'), Ok("bar"));
-        assert_eq!(lex_quoted_content("ab\\\"cd\\\"ef\"yz", '"'), Ok("yz"));
+        assert_eq!(lex_quoted_content("", '"'), None);
+        assert_eq!(lex_quoted_content("\"", '"'), Some(""));
+        assert_eq!(lex_quoted_content("\"foo", '"'), Some("foo"));
+        assert_eq!(lex_quoted_content("foo\"bar", '"'), Some("bar"));
+        assert_eq!(lex_quoted_content("foo\"", '"'), Some(""));
+        assert_eq!(lex_quoted_content("foo\\\"", '"'), None);
+        assert_eq!(lex_quoted_content("foo\\\"bar", '"'), None);
+        assert_eq!(lex_quoted_content("foo\\\\\"", '"'), Some(""));
+        assert_eq!(lex_quoted_content("foo\\\\\"bar", '"'), Some("bar"));
+        assert_eq!(lex_quoted_content("ab\\\"cd\\\"ef\"yz", '"'), Some("yz"));
     }
 
     #[test]

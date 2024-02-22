@@ -5,7 +5,7 @@ use smol_str::SmolStr;
 use crate::{
     lexer::{
         lex_char_or_label, lex_doc_comment, lex_integer_or_float, lex_keyword_or_ident, lex_quoted,
-        lex_raw_string, lex_whitespace, UnterminatedBlockComment,
+        lex_raw_string, trim_whitespace,
     },
     token::{Expect, FixedTokenKind, TokenKind, TokenSet},
 };
@@ -15,43 +15,40 @@ use super::{TinyError, TinyResult};
 #[derive(Debug)]
 pub(crate) struct TinyLexer<'code> {
     code: &'code str,
-    pos: usize,
 }
 
 impl<'code> TinyLexer<'code> {
     pub(crate) fn new(code: &'code str) -> Self {
-        Self { code, pos: 0 }
+        Self { code }
     }
 
-    /// Yields the next token, assuming [`Self::skip_whitespace()`] was called previously.
+    /// Yields the next token, assuming whitespace was skipped already.
     pub(crate) fn next_token(&mut self) -> TinyResult<TinyLexerToken> {
-        let rest = &self.code[self.pos..];
-
-        let (kind, len) = if let Some(kind_len) = lex_doc_comment(rest) {
+        let (kind, len) = if let Some(kind_len) = lex_doc_comment(self.code) {
             kind_len
-        } else if let Some(kind_len) = lex_integer_or_float(rest) {
+        } else if let Some(kind_len) = lex_integer_or_float(self.code) {
             kind_len
-        } else if let Some(kind_len) = lex_char_or_label(rest).map_err(|_| TinyError)? {
+        } else if let Some(kind_len) = lex_char_or_label(self.code).map_err(|_| TinyError)? {
             kind_len
-        } else if let Some(kind_len) = lex_quoted(rest).map_err(|_| TinyError)? {
+        } else if let Some(kind_len) = lex_quoted(self.code).map_err(|_| TinyError)? {
             kind_len
-        } else if let Some(kind_len) = lex_raw_string(rest).map_err(|_| TinyError)? {
+        } else if let Some(kind_len) = lex_raw_string(self.code).map_err(|_| TinyError)? {
             kind_len
-        } else if let Some(kind_len) = lex_keyword_or_ident(rest) {
+        } else if let Some(kind_len) = lex_keyword_or_ident(self.code) {
             kind_len
-        } else if let Some((kind, len)) = FixedTokenKind::parse_symbol(rest.as_bytes()) {
+        } else if let Some((kind, len)) = FixedTokenKind::parse_symbol(self.code.as_bytes()) {
             (kind.into(), len)
-        } else if let Some(kind) = FixedTokenKind::parse_char(rest.as_bytes()[0]) {
+        } else if let Some(kind) = FixedTokenKind::parse_char(self.code.as_bytes()[0]) {
             (kind.into(), 1)
         } else {
             return Err(TinyError);
         };
 
-        self.pos += len;
+        self.code = &self.code[len..];
         Ok(TinyLexerToken {
             kind,
             text: if kind.is_dynamic() {
-                rest[..len].into()
+                self.code[..len].into()
             } else {
                 SmolStr::default()
             },
@@ -59,21 +56,33 @@ impl<'code> TinyLexer<'code> {
     }
 }
 
+impl<'code> From<&'code str> for TinyLexer<'code> {
+    fn from(code: &'code str) -> Self {
+        Self { code }
+    }
+}
+
 impl Iterator for TinyLexer<'_> {
     type Item = TinyResult<TinyLexerToken>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match lex_whitespace(self.code, &mut self.pos) {
-            Ok(eof) => (!eof).then(|| self.next_token()),
-            Err(UnterminatedBlockComment) => Some(Err(TinyError)),
+        match trim_whitespace(self.code) {
+            Ok(rest) => {
+                self.code = rest;
+                (!self.code.is_empty()).then(|| self.next_token())
+            }
+            Err(_) => {
+                self.code = "";
+                Some(Err(TinyError))
+            }
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TinyLexerToken {
-    pub(crate) kind: TokenKind,
-    pub(crate) text: SmolStr,
+    kind: TokenKind,
+    text: SmolStr,
 }
 
 pub(crate) trait TinyTokenStream: Iterator<Item = TinyResult<TinyLexerToken>> {}
@@ -83,9 +92,9 @@ impl<T: Iterator<Item = TinyResult<TinyLexerToken>>> TinyTokenStream for T {}
 /// A [`TinyTokenStream`] that also makes sure the next token matches what is [`Expect`]ed.
 #[derive(Debug)]
 pub(crate) struct CheckedTinyTokenStream<T: TinyTokenStream> {
-    pub(crate) token_stream: T,
-    pub(crate) current_kind: Option<TokenKind>,
-    pub(crate) next_token: SmolStr,
+    token_stream: T,
+    current_kind: Option<TokenKind>,
+    next_token: SmolStr,
 }
 
 impl<T: TinyTokenStream> CheckedTinyTokenStream<T> {
