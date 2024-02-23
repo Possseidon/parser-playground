@@ -1,8 +1,6 @@
 pub(crate) mod lexer;
 pub(crate) mod parser;
-pub(crate) mod positioned;
 pub(crate) mod push_array;
-pub(crate) mod tiny;
 pub(crate) mod token;
 
 use std::{hint::black_box, time::Instant};

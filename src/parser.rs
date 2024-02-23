@@ -6,9 +6,9 @@ use paste::paste;
 use smallvec::SmallVec;
 
 use crate::{
-    lexer::CheckedLexer,
+    lexer::{CheckedLexer, Lexer, LexerError},
     push_array::PushArray,
-    token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenStorage},
+    token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenStack, TokenStorage},
 };
 
 /// The state of an iterative parsing process.
@@ -17,14 +17,14 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct ParseState<'code, S: Style> {
     parsers: Vec<ParseStep<S>>,
-    pub(crate) lexer: CheckedLexer<'code, S>,
-    pub(crate) tokens: S::TokenStack,
+    pub(crate) lexer: CheckedLexer<'code>,
+    pub(crate) tokens: TokenStack,
     pub(crate) nodes: NodeStack<S>,
 }
 
 impl<'code, S: Style> ParseState<'code, S> {
     /// Creates a new parsing state from a lexer.
-    pub(crate) fn new(lexer: CheckedLexer<'code, S>) -> Self {
+    pub(crate) fn new(lexer: CheckedLexer<'code>) -> Self {
         Self {
             parsers: Vec::new(),
             lexer,
@@ -79,7 +79,7 @@ type ParseFn<S> = fn(
     expect: Expect,
     field: usize,
     repetition: bool,
-) -> Result<(), <S as Style>::Error>;
+) -> Result<(), LexerError>;
 
 /// A single iterative parsing step.
 #[derive(Clone, Copy, Debug)]
@@ -92,7 +92,7 @@ struct ParseStep<S: Style> {
 
 impl<S: Style> ParseStep<S> {
     /// Calls the `parse` function.
-    fn parse(self, state: &mut ParseState<S>) -> Result<(), S::Error> {
+    fn parse(self, state: &mut ParseState<S>) -> Result<(), LexerError> {
         (self.parse)(state, self.expect, self.field, self.repetition)
     }
 }
@@ -115,13 +115,13 @@ pub(crate) trait ParseImpl<S: Style>: Sized + ExpectedTokens {
         expect: Expect,
         field: usize,
         repetition: bool,
-    ) -> Result<(), S::Error>;
+    ) -> Result<(), LexerError>;
 
     /// Used at the very end to pop the last node from the node stack.
     fn pop_final_node(nodes: &mut NodeStack<S>) -> Self;
 
     /// Used by [`TinyParse::tiny_parse_fast()`].
-    fn parse_nested(lexer: &mut CheckedLexer<S>, expect: Expect) -> Result<Self, S::Error>;
+    fn parse_nested(lexer: &mut CheckedLexer, expect: Expect) -> Result<Self, LexerError>;
 }
 
 pub(crate) trait Parse<S: Style>: ParseImpl<S> {
@@ -132,18 +132,15 @@ pub(crate) trait Parse<S: Style>: ParseImpl<S> {
     ///
     /// Keep in mind, that you might also want to limit the size of the input to some maximum to
     /// also effectively limit its execution time, so that it doesn't hang up the program.
-    fn parse(code: &str) -> Result<Self, S::Error> {
-        let lexer = S::new_lexer(code)?;
-        let lexer = CheckedLexer::<S>::new(lexer, Self::INITIAL_EXPECT)?;
+    fn parse(code: &str) -> Result<Self, LexerError> {
+        let lexer = Lexer::new(code)?;
+        let lexer = CheckedLexer::new(lexer, Self::INITIAL_EXPECT)?;
         let mut state = ParseState::<S>::new(lexer);
         Self::parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
         while let Some(parser) = state.parsers.pop() {
             parser.parse(&mut state)?;
         }
-        assert!(
-            S::finish_token_stack(state.tokens),
-            "token stack should be empty"
-        );
+        assert!(state.tokens.finish(), "token stack should be empty");
         let result = Self::pop_final_node(&mut state.nodes);
         assert!(state.nodes.finish(), "node stack should be empty");
         Ok(result)
@@ -160,8 +157,8 @@ pub(crate) trait Parse<S: Style>: ParseImpl<S> {
     /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
     /// check to slow down parsing (even though it probably wouldn't be much). I might look into
     /// this again in the future, but for now I'll keep it as is.
-    fn parse_fast(code: &str) -> Result<Self, S::Error> {
-        let lexer = S::new_lexer(code)?;
+    fn parse_fast(code: &str) -> Result<Self, LexerError> {
+        let lexer = Lexer::new(code)?;
         let mut lexer = CheckedLexer::new(lexer, Self::INITIAL_EXPECT)?;
         Self::parse_nested(&mut lexer, Expect::END_OF_INPUT)
     }
@@ -190,13 +187,13 @@ macro_rules! parse_node_repetition {
 /// Recursively parses a single field of a concatenation.
 macro_rules! parse_by_mode {
     ( [$Token:ident] $lexer:ident $expect:tt ) => {
-        tokens::$Token::parse_required($lexer, $expect)?
+        tokens::$Token::parse_required::<S>($lexer, $expect)?
     };
     ( [$Token:ident?] $lexer:ident $expect:tt ) => {
-        tokens::$Token::parse_optional($lexer, $expect)?
+        tokens::$Token::parse_optional::<S>($lexer, $expect)?
     };
     ( [$Token:ident*] $lexer:ident $expect:tt ) => {
-        tokens::$Token::parse_repetition($lexer, $expect)?
+        tokens::$Token::parse_repetition::<S>($lexer, $expect)?
     };
     ( ($Node:ident) $lexer:ident $expect:tt ) => {
         parse_node!($Node $lexer $expect)
@@ -605,7 +602,7 @@ macro_rules! impl_struct_parse {
                 expect: Expect,
                 field: usize,
                 repetition: bool,
-            ) -> Result<(), S::Error> {
+            ) -> Result<(), LexerError> {
                 if field == [<$Name:snake>]::Field::LENGTH {
                     $( let $field; )*
                     reverse!( $( {
@@ -625,7 +622,7 @@ macro_rules! impl_struct_parse {
 
             impl_pop_final_node!($Name);
 
-            fn parse_nested(lexer: &mut CheckedLexer<S>, expect: Expect) -> Result<Self, S::Error> {
+            fn parse_nested(lexer: &mut CheckedLexer, expect: Expect) -> Result<Self, LexerError> {
                 Ok(Self { $( $field: {
                     parse_by_mode!($Field lexer { expect_field!($Field $Name $field expect) })
                 }, )* })
@@ -735,7 +732,7 @@ macro_rules! impl_enum_parse {
                 expect: Expect,
                 field: usize,
                 _repetition: bool,
-            ) -> Result<(), S::Error> {
+            ) -> Result<(), LexerError> {
                 // token-only alternations never call a build-step, leading to some unreachable code
                 #[allow(unreachable_code)]
                 if field == 1 {
@@ -751,7 +748,7 @@ macro_rules! impl_enum_parse {
                 let found = state.lexer.kind();
 
                 $( if found == TokenKind::$Token {
-                    state.nodes.[<$Name:snake>].push(Self::$Token(tokens::$Token::parse_required(&mut state.lexer, expect)?));
+                    state.nodes.[<$Name:snake>].push(Self::$Token(tokens::$Token::parse_required::<S>(&mut state.lexer, expect)?));
                     return Ok(());
                 } )*
 
@@ -768,11 +765,11 @@ macro_rules! impl_enum_parse {
 
             impl_pop_final_node!($Name);
 
-            fn parse_nested(lexer: &mut CheckedLexer<S>, expect: Expect) -> Result<Self, S::Error> {
+            fn parse_nested(lexer: &mut CheckedLexer, expect: Expect) -> Result<Self, LexerError> {
                 let found = lexer.kind();
 
                 $( if found == TokenKind::$Token {
-                    return Ok(Self::$Token(tokens::$Token::parse_required(lexer, expect)?));
+                    return Ok(Self::$Token(tokens::$Token::parse_required::<S>(lexer, expect)?));
                 } )*
 
                 $( if $Node::<S>::EXPECTED_TOKENS.tokens.contains(found) {

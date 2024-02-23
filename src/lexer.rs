@@ -1,33 +1,130 @@
-use std::mem::replace;
+use std::{mem::replace, num::NonZeroUsize};
 
 use thiserror::Error;
 
-use crate::token::{Expect, FixedTokenKind, Style, TokenKind, TokenSet};
+use crate::token::{Expect, FixedTokenKind, TokenKind, TokenSet};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LexerToken<S: Style> {
-    pub(crate) kind: TokenKind,
-    pub(crate) token: S::Token,
+#[derive(Debug)]
+pub(crate) struct Lexer<'code> {
+    code: &'code str,
+    pos: usize,
 }
 
-impl<S: Style> Copy for LexerToken<S> where S::Token: Copy {}
+impl<'code> Lexer<'code> {
+    pub(crate) fn new(code: &'code str) -> Result<Self, LexerError> {
+        let mut result = Self { code, pos: 0 };
+        result.skip_whitespace()?;
+        Ok(result)
+    }
+
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn next_token(&mut self) -> Result<LexerToken, LexerErrorKind> {
+        let rest = &self.code[self.pos..];
+        let (kind, len) = if let Some(kind_len) = lex_doc_comment(rest) {
+            kind_len
+        } else if let Some(kind_len) = lex_integer_or_float(rest) {
+            kind_len
+        } else if let Some(kind_len) = lex_char_or_label(rest)? {
+            kind_len
+        } else if let Some(kind_len) = lex_quoted(rest)? {
+            kind_len
+        } else if let Some(kind_len) = lex_raw_string(rest)? {
+            kind_len
+        } else if let Some(kind_len) = lex_keyword_or_ident(rest) {
+            kind_len
+        } else if let Some((kind, len)) = FixedTokenKind::parse_symbol(rest.as_bytes()) {
+            (kind.into(), len)
+        } else if let Some(kind) = FixedTokenKind::parse_char(rest.as_bytes()[0]) {
+            (kind.into(), 1)
+        } else {
+            return Err(LexerErrorKind::InvalidChar);
+        };
+
+        self.pos += len;
+        Ok(LexerToken {
+            kind,
+            len: NonZeroUsize::new(len).expect("token should not be empty"),
+        })
+    }
+
+    fn skip_whitespace(&mut self) -> Result<(), LexerError> {
+        let after_whitespace =
+            trim_whitespace(&self.code[self.pos..]).map_err(|error| LexerError {
+                pos: 0,
+                kind: error.into(),
+            })?;
+        self.pos = self.code.len() - after_whitespace.len();
+        Ok(())
+    }
+}
+
+impl Iterator for Lexer<'_> {
+    type Item = Result<LexerToken, LexerError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos == self.code.len() {
+            return None;
+        }
+
+        match self.next_token() {
+            Ok(token) => {
+                if let Err(error) = self.skip_whitespace() {
+                    return Some(Err(error));
+                };
+                Some(Ok(token))
+            }
+            Err(error) => Some(Err(LexerError {
+                pos: self.pos,
+                kind: error,
+            })),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LexerError {
+    pub(crate) pos: usize,
+    pub(crate) kind: LexerErrorKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub(crate) enum LexerErrorKind {
+    #[error(transparent)]
+    Unterminated(#[from] Unterminated),
+    #[error("invalid character")]
+    InvalidChar,
+    #[error("{expect:?} expected, found {found:?}")]
+    UnexpectedToken {
+        expect: Expect,
+        found: Option<TokenKind>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LexerToken {
+    pub(crate) kind: TokenKind,
+    pub(crate) len: NonZeroUsize,
+}
 
 /// A [`TinyLexer`] that also makes sure the next token matches what is [`Expect`]ed.
 #[derive(Debug)]
-pub(crate) struct CheckedLexer<'code, S: Style> {
-    lexer: S::Lexer<'code>,
+pub(crate) struct CheckedLexer<'code> {
+    lexer: Lexer<'code>,
     current_kind: Option<TokenKind>,
-    pos: S::Pos,
-    next_token: S::Token,
+    pos: usize,
+    next_token_len: NonZeroUsize,
 }
 
-impl<'code, S: Style> CheckedLexer<'code, S> {
-    pub(crate) fn new(lexer: S::Lexer<'code>, expect: Expect) -> Result<Self, S::Error> {
+impl<'code> CheckedLexer<'code> {
+    pub(crate) fn new(lexer: Lexer<'code>, expect: Expect) -> Result<Self, LexerError> {
         let mut result = Self {
             lexer,
             current_kind: None,
             pos: Default::default(),
-            next_token: S::ARBITRARY_TOKEN,
+            next_token_len: NonZeroUsize::MIN,
         };
         result.next(expect)?; // replace empty current token with actual first token
         Ok(result)
@@ -37,7 +134,7 @@ impl<'code, S: Style> CheckedLexer<'code, S> {
         self.current_kind.expect("current token kind should be set")
     }
 
-    pub(crate) fn pos(&self) -> S::Pos {
+    pub(crate) fn pos(&self) -> usize {
         self.pos
     }
 
@@ -47,25 +144,33 @@ impl<'code, S: Style> CheckedLexer<'code, S> {
     }
 
     /// Yields a token from the lexer while also making sure the token afterwards matches `expect`.
-    pub(crate) fn next(&mut self, expect: Expect) -> Result<S::Token, S::Error> {
-        self.pos = S::lexer_pos(&self.lexer);
+    pub(crate) fn next(&mut self, expect: Expect) -> Result<NonZeroUsize, LexerError> {
+        self.pos = self.lexer.pos();
         if let Some(next_token) = self.lexer.next() {
             let next_token = next_token?;
             if expect.tokens.contains(next_token.kind) {
                 self.current_kind = Some(next_token.kind);
-                Ok(replace(&mut self.next_token, next_token.token))
+                Ok(replace(&mut self.next_token_len, next_token.len))
             } else {
-                Err(S::unexpected_token(
-                    &self.lexer,
-                    expect,
-                    Some(next_token.kind),
-                ))
+                Err(LexerError {
+                    pos: self.pos,
+                    kind: LexerErrorKind::UnexpectedToken {
+                        expect,
+                        found: Some(next_token.kind),
+                    },
+                })
             }
         } else if expect.or_end_of_input {
             self.current_kind = None;
-            Ok(replace(&mut self.next_token, S::ARBITRARY_TOKEN))
+            Ok(replace(&mut self.next_token_len, NonZeroUsize::MIN))
         } else {
-            Err(S::unexpected_token(&self.lexer, expect, None))
+            Err(LexerError {
+                pos: self.pos,
+                kind: LexerErrorKind::UnexpectedToken {
+                    expect,
+                    found: None,
+                },
+            })
         }
     }
 }

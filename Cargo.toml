@@ -10,5 +10,4 @@ bitvec = "1.0.1"
 enum-map = "2.7.3"
 paste = "1.0.14"
 smallvec = { version = "1.11.2", features = ["union"] }
-smol_str = "0.2.0"
 thiserror = "1.0.56"
