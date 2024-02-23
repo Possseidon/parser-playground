@@ -103,7 +103,7 @@ pub(crate) enum LexerErrorKind {
     #[error("{expect:?} expected, found {found:?}")]
     UnexpectedToken {
         expect: Expect,
-        found: Option<TokenKind>,
+        found: Option<LexerToken>,
     },
 }
 
@@ -160,7 +160,7 @@ impl<'code> CheckedLexer<'code> {
                     pos: self.pos,
                     kind: LexerErrorKind::UnexpectedToken {
                         expect,
-                        found: Some(next_token.kind),
+                        found: Some(next_token),
                     },
                 })
             }
