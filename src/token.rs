@@ -296,9 +296,9 @@ macro_rules! impl_fixed_token_kind {
 }
 
 pub(crate) trait TokenStorage<S: Style> {
-    type Required;
-    type Optional;
-    type Repetition;
+    type Required: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
+    type Optional: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
+    type Repetition: Clone + fmt::Debug + PartialEq + Eq + TryCodeSpan;
 }
 
 impl_token_kind! {

@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, ops::Range};
 
 use bitvec::vec::BitVec;
 use enum_map::{Enum, EnumMap};
@@ -8,7 +8,10 @@ use smallvec::SmallVec;
 use crate::{
     lexer::{CheckedLexer, Lexer, LexerError},
     push_array::PushArray,
-    token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenStack, TokenStorage},
+    token::{
+        tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenStack, TokenStorage,
+        TryCodeSpan,
+    },
 };
 
 /// The state of an iterative parsing process.
@@ -362,17 +365,16 @@ macro_rules! until_required {
     ( $tokens:ident ($Node:ident[*]) $( $rest:tt )* ) => { { xor_node!($tokens $Node); until_required!( $tokens $( $rest )* ) } };
 }
 
-/// Converts a field specifier on a concatenation into the storage type.
 macro_rules! field_type {
     ( [$Token:ident] ) => { <tokens::$Token as TokenStorage<S>>::Required };
     ( [$Token:ident?] ) => { <tokens::$Token as TokenStorage<S>>::Optional };
     ( [$Token:ident*] ) => { <tokens::$Token as TokenStorage<S>>::Repetition };
     ( ($Node:ident) ) => { $Node<S> };
-    ( ($Node:ident[]) ) => { Box<$Node<S>> };
-    ( ($Node:ident?) ) => { Option<$Node<S>> };
-    ( ($Node:ident[?]) ) => { Option<Box<$Node<S>>> };
-    ( ($Node:ident*) ) => { SmallVec<[$Node<S>; 1]> };
-    ( ($Node:ident[*]) ) => { Vec<$Node<S>> };
+    ( ($Node:ident[]) ) => { Box<$Node<S>> }; // TODO: just CodeSpan implement for Box<T>
+    ( ($Node:ident?) ) => { Option<$Node<S>> }; // TODO: custom type with pos (usize if Style == Full; () otherwise)
+    ( ($Node:ident[?]) ) => { Option<Box<$Node<S>>> }; // TODO: re-use new CustomOption<T> replacement
+    ( ($Node:ident*) ) => { SmallVec<[$Node<S>; 1]> }; // TODO: custom type with pos (usize if Style == Full; () otherwise)
+    ( ($Node:ident[*]) ) => { Vec<$Node<S>> }; // TODO: custom type with pos (usize if Style == Full; () otherwise)
 }
 
 /// Pops a concatenation field from the node/token stack.
@@ -635,6 +637,15 @@ macro_rules! impl_struct_parse {
                 self.drain_into_dropped_nodes(&mut nodes);
             }
         }
+
+        impl<S: Style> TryCodeSpan for $Name<S> {
+            fn try_code_span(&self) -> Option<Range<usize>> {
+                let (first, ..) = ( $( &self.$field, )* );
+                let (.., last) = ( $( &self.$field, )* );
+                // Some(first.try_code_span()?.start..last.try_code_span()?.end)
+                todo!()
+            }
+        }
     } };
 }
 
@@ -777,6 +788,15 @@ macro_rules! impl_enum_parse {
                 } )*
 
                 unreachable!("token should match one of the above cases");
+            }
+        }
+
+        impl<S: Style> TryCodeSpan for $Name<S> {
+            fn try_code_span(&self) -> Option<Range<usize>> {
+                match self {
+                    $( Self::$Node(node) => node.try_code_span(), )*
+                    $( Self::$Token(token) => token.try_code_span(), )*
+                }
             }
         }
     } };
