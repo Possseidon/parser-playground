@@ -51,12 +51,10 @@ impl<'code> Lexer<'code> {
     }
 
     fn skip_whitespace(&mut self) -> Result<(), LexerError> {
-        let after_whitespace =
-            trim_whitespace(&self.code[self.pos..]).map_err(|error| LexerError {
-                pos: 0,
-                kind: error.into(),
-            })?;
-        self.pos = self.code.len() - after_whitespace.len();
+        self.pos += lex_whitespace(&self.code[self.pos..]).map_err(|error| LexerError {
+            pos: 0,
+            kind: error.into(),
+        })?;
         Ok(())
     }
 }
@@ -348,27 +346,27 @@ pub(crate) fn lex_keyword_or_ident(rest: &str) -> Option<(TokenKind, usize)> {
     )
 }
 
-/// Trims whitespace (including comments) from the start of a string.
-pub(crate) fn trim_whitespace(mut code: &str) -> Result<&str, Unterminated> {
+/// Finds the first non-whitespace character.
+pub(crate) fn lex_whitespace(code: &str) -> Result<usize, Unterminated> {
+    let mut pos = 0;
     loop {
-        match code.bytes().next() {
-            None => break Ok(""),
+        match code[pos..].bytes().next() {
+            None => break Ok(code.len()),
             Some(c) if c.is_ascii_whitespace() => {
-                let pos = code[1..]
+                pos = code[pos + 1..]
                     .find(|c: char| !c.is_ascii_whitespace())
                     .map_or(code.len(), |len| len + 1);
-                code = &code[pos..];
             }
             Some(b'/') => {
-                if code[1..].starts_with("//") {
+                if code[pos + 1..].starts_with("//") {
                     // doc-comments are not considered whitespace
-                    break Ok(code);
+                    break Ok(pos);
                 }
-                if code[1..].starts_with('/') {
-                    code = &code[2 + find_line_break(&code[2..])..];
-                } else if code[1..].starts_with('*') {
+                if code[pos + 1..].starts_with('/') {
+                    pos = 2 + find_line_break(&code[pos + 2..]);
+                } else if code[pos + 1..].starts_with('*') {
                     let start_len = code.len();
-                    let mut after_block_comment = &code[2..];
+                    let mut after_block_comment = &code[pos + 2..];
                     let mut nesting: usize = 0;
                     loop {
                         let Some(len) = after_block_comment.find("*/") else {
@@ -380,17 +378,17 @@ pub(crate) fn trim_whitespace(mut code: &str) -> Result<&str, Unterminated> {
                         } else {
                             after_block_comment = &after_block_comment[len + 2..];
                             if nesting == 0 {
-                                code = &code[start_len - after_block_comment.len()..];
+                                pos = start_len - after_block_comment.len();
                                 break;
                             }
                             nesting -= 1;
                         }
                     }
                 } else {
-                    break Ok(code);
+                    break Ok(pos);
                 }
             }
-            _ => break Ok(code),
+            _ => break Ok(pos),
         }
     }
 }
@@ -556,22 +554,22 @@ mod tests {
 
     #[test]
     fn test_trim_whitespace() {
-        assert_eq!(trim_whitespace(""), Ok(""));
-        assert_eq!(trim_whitespace("foo"), Ok("foo"));
-        assert_eq!(trim_whitespace(" \n\t"), Ok(""));
-        assert_eq!(trim_whitespace(" \n\tfoo"), Ok("foo"));
-        assert_eq!(trim_whitespace("// foo"), Ok(""));
-        assert_eq!(trim_whitespace("// foo\n"), Ok(""));
-        assert_eq!(trim_whitespace("// foo\nbar"), Ok("bar"));
-        assert_eq!(trim_whitespace("/// foo"), Ok("/// foo"));
-        assert_eq!(trim_whitespace("/*foo bar*/"), Ok(""));
-        assert_eq!(trim_whitespace("/*foo bar*/bar"), Ok("bar"));
-        assert_eq!(trim_whitespace("/*/"), Err(Unterminated::BlockComment));
-        assert_eq!(trim_whitespace("/*/**/"), Err(Unterminated::BlockComment));
-        assert_eq!(trim_whitespace("/*/**/*/"), Ok(""));
-        assert_eq!(trim_whitespace("/*/**/*/foo"), Ok("foo"));
-        assert_eq!(trim_whitespace("/**/"), Ok(""));
-        assert_eq!(trim_whitespace("/**/foo"), Ok("foo"));
+        assert_eq!(lex_whitespace(""), Ok(0));
+        assert_eq!(lex_whitespace("foo"), Ok(0));
+        assert_eq!(lex_whitespace(" \n\t"), Ok(3));
+        assert_eq!(lex_whitespace(" \n\tfoo"), Ok(3));
+        assert_eq!(lex_whitespace("// foo"), Ok(6));
+        assert_eq!(lex_whitespace("// foo\n"), Ok(7));
+        assert_eq!(lex_whitespace("// foo\nbar"), Ok(7));
+        assert_eq!(lex_whitespace("/// foo"), Ok(0));
+        assert_eq!(lex_whitespace("/*foo bar*/"), Ok(11));
+        assert_eq!(lex_whitespace("/*foo bar*/bar"), Ok(11));
+        assert_eq!(lex_whitespace("/*/"), Err(Unterminated::BlockComment));
+        assert_eq!(lex_whitespace("/*/**/"), Err(Unterminated::BlockComment));
+        assert_eq!(lex_whitespace("/*/**/*/"), Ok(8));
+        assert_eq!(lex_whitespace("/*/**/*/foo"), Ok(8));
+        assert_eq!(lex_whitespace("/**/"), Ok(4));
+        assert_eq!(lex_whitespace("/**/foo"), Ok(4));
     }
 
     #[test]
