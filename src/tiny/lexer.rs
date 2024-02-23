@@ -16,8 +16,10 @@ pub(crate) struct TinyLexer<'code> {
 }
 
 impl<'code> TinyLexer<'code> {
-    pub(crate) fn new(code: &'code str) -> Self {
-        TinyLexer { code }
+    pub(crate) fn new(code: &'code str) -> Result<Self, TinyError> {
+        Ok(TinyLexer {
+            code: trim_whitespace(code).map_err(|_| TinyError)?,
+        })
     }
 
     /// Yields the next token, assuming whitespace was skipped already.
@@ -57,15 +59,19 @@ impl Iterator for TinyLexer<'_> {
     type Item = Result<LexerToken<Tiny>, TinyError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match trim_whitespace(self.code) {
-            Ok(rest) => {
+        if self.code.is_empty() {
+            return None;
+        }
+
+        match self.next_token() {
+            Ok(token) => {
+                let Ok(rest) = trim_whitespace(self.code) else {
+                    return Some(Err(TinyError));
+                };
                 self.code = rest;
-                (!self.code.is_empty()).then(|| self.next_token())
+                Some(Ok(token))
             }
-            Err(_) => {
-                self.code = "";
-                Some(Err(TinyError))
-            }
+            Err(error) => Some(Err(TinyError)),
         }
     }
 }

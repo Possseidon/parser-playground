@@ -17,8 +17,10 @@ pub(crate) struct PositionedLexer<'code> {
 }
 
 impl<'code> PositionedLexer<'code> {
-    pub(crate) fn new(code: &'code str) -> Self {
-        Self { code, pos: 0 }
+    pub(crate) fn new(code: &'code str) -> Result<Self, PositionedLexerError> {
+        let mut result = Self { code, pos: 0 };
+        result.skip_whitespace()?;
+        Ok(result)
     }
 
     pub(crate) fn pos(&self) -> usize {
@@ -53,42 +55,39 @@ impl<'code> PositionedLexer<'code> {
             token: NonZeroUsize::new(len).expect("token should not be empty"),
         })
     }
+
+    fn skip_whitespace(&mut self) -> Result<(), PositionedLexerError> {
+        let after_whitespace =
+            trim_whitespace(&self.code[self.pos..]).map_err(|error| PositionedLexerError {
+                pos: 0,
+                kind: error.into(),
+            })?;
+        self.pos = self.code.len() - after_whitespace.len();
+        Ok(())
+    }
 }
 
 impl Iterator for PositionedLexer<'_> {
     type Item = Result<LexerToken<Positioned>, PositionedLexerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let pos = self.pos;
-        match trim_whitespace(self.code) {
-            Ok(rest) => (!rest.is_empty()).then(|| {
-                self.pos += self.code.len() - rest.len();
-                self.next_token().map_err(|kind| {
-                    self.pos = self.code.len();
-                    PositionedLexerError { pos, kind }
-                })
-            }),
-            Err(kind) => {
-                self.pos = self.code.len();
-                Some(Err(PositionedLexerError {
-                    pos,
-                    kind: LexerError::Unterminated(kind),
-                }))
+        if self.pos == self.code.len() {
+            return None;
+        }
+
+        match self.next_token() {
+            Ok(token) => {
+                if let Err(error) = self.skip_whitespace() {
+                    return Some(Err(error));
+                };
+                Some(Ok(token))
             }
+            Err(error) => Some(Err(PositionedLexerError {
+                pos: self.pos,
+                kind: error,
+            })),
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TokenSpan {
-    pub(crate) pos: usize,
-    pub(crate) len: NonZeroUsize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OptionalTokenSpan {
-    Some(TokenSpan),
-    None { pos: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

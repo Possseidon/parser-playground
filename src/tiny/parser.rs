@@ -2,41 +2,6 @@ use bitvec::vec::BitVec;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 
-use crate::{
-    lexer::CheckedLexer,
-    parser::{ExpectedTokens, ParseImpl},
-    token::{Expect, Tiny},
-};
-
-use super::{lexer::TinyLexer, TinyError};
-
-pub(crate) trait ParseFastImpl: Sized {
-    /// Used by [`TinyParse::tiny_parse_fast()`].
-    fn parse_nested(lexer: &mut CheckedLexer<Tiny>, expect: Expect) -> Result<Self, TinyError>;
-}
-
-/// Allows parsing recursively, which might stack overflow.
-pub(crate) trait ParseFast: ParseImpl<Tiny> + ParseFastImpl {
-    /// Parses recursively.
-    ///
-    /// This is very fast, but might lead to a stack overflow for deeply nested code. To avoid
-    /// crashes for e.g. untrusted input, use [`parser::Parse::parse()`].
-    ///
-    /// One could add a `max_recursion` limit here, but that can't really provide any guarantees,
-    /// since the stack might already be almost full despite a low limit.
-    ///
-    /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
-    /// check to slow down parsing (even though it probably wouldn't be much). I might look into
-    /// this again in the future, but for now I'll keep it as is.
-    fn parse_fast(code: &str) -> Result<Self, TinyError> {
-        let lexer = TinyLexer::new(code);
-        let mut lexer = CheckedLexer::new(lexer, Self::INITIAL_EXPECT)?;
-        Self::parse_nested(&mut lexer, Expect::END_OF_INPUT)
-    }
-}
-
-impl<T: ParseImpl<Tiny> + ParseFastImpl> ParseFast for T {}
-
 /// A stack of tokens which might be optionals or repetitions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TinyTokenStack {

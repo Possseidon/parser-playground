@@ -2,7 +2,7 @@ use std::mem::replace;
 
 use thiserror::Error;
 
-use crate::token::{Expect, FixedTokenKind, Positioned, Style, TokenKind, TokenSet};
+use crate::token::{Expect, FixedTokenKind, Style, TokenKind, TokenSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LexerToken<S: Style> {
@@ -17,6 +17,7 @@ impl<S: Style> Copy for LexerToken<S> where S::Token: Copy {}
 pub(crate) struct CheckedLexer<'code, S: Style> {
     lexer: S::Lexer<'code>,
     current_kind: Option<TokenKind>,
+    pos: S::Pos,
     next_token: S::Token,
 }
 
@@ -25,6 +26,7 @@ impl<'code, S: Style> CheckedLexer<'code, S> {
         let mut result = Self {
             lexer,
             current_kind: None,
+            pos: Default::default(),
             next_token: S::ARBITRARY_TOKEN,
         };
         result.next(expect)?; // replace empty current token with actual first token
@@ -32,7 +34,11 @@ impl<'code, S: Style> CheckedLexer<'code, S> {
     }
 
     pub(crate) fn kind(&self) -> TokenKind {
-        self.current_kind.expect("token kind should be set")
+        self.current_kind.expect("current token kind should be set")
+    }
+
+    pub(crate) fn pos(&self) -> S::Pos {
+        self.pos
     }
 
     pub(crate) fn matches(&self, tokens: impl Into<TokenSet>) -> bool {
@@ -42,6 +48,7 @@ impl<'code, S: Style> CheckedLexer<'code, S> {
 
     /// Yields a token from the lexer while also making sure the token afterwards matches `expect`.
     pub(crate) fn next(&mut self, expect: Expect) -> Result<S::Token, S::Error> {
+        self.pos = S::lexer_pos(&self.lexer);
         if let Some(next_token) = self.lexer.next() {
             let next_token = next_token?;
             if expect.tokens.contains(next_token.kind) {
@@ -60,12 +67,6 @@ impl<'code, S: Style> CheckedLexer<'code, S> {
         } else {
             Err(S::unexpected_token(&self.lexer, expect, None))
         }
-    }
-}
-
-impl CheckedLexer<'_, Positioned> {
-    pub(crate) fn pos(&self) -> usize {
-        self.lexer.pos()
     }
 }
 

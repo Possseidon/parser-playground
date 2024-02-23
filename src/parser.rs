@@ -8,7 +8,6 @@ use smallvec::SmallVec;
 use crate::{
     lexer::CheckedLexer,
     push_array::PushArray,
-    tiny::{parser::ParseFastImpl, TinyError},
     token::{tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenStorage},
 };
 
@@ -17,7 +16,7 @@ use crate::{
 /// Consists of a lexer and stacks for parsing steps, tokens and nodes.
 #[derive(Debug)]
 pub(crate) struct ParseState<'code, S: Style> {
-    parsers: Vec<ParseFn<S>>,
+    parsers: Vec<ParseStep<S>>,
     pub(crate) lexer: CheckedLexer<'code, S>,
     pub(crate) tokens: S::TokenStack,
     pub(crate) nodes: NodeStack<S>,
@@ -36,7 +35,7 @@ impl<'code, S: Style> ParseState<'code, S> {
 
     /// Pushes a new parsing step for a normal node.
     pub(crate) fn push_parser<N: ParseImpl<S>>(&mut self, expect: Expect) {
-        self.parsers.push(ParseFn {
+        self.parsers.push(ParseStep {
             parse: N::parse_iterative,
             expect,
             field: 0,
@@ -46,7 +45,7 @@ impl<'code, S: Style> ParseState<'code, S> {
 
     /// Pushes a new parsing step for building an alternation.
     pub(crate) fn push_build_enum<N: ParseImpl<S>>(&mut self, expect: Expect) {
-        self.parsers.push(ParseFn {
+        self.parsers.push(ParseStep {
             parse: N::parse_iterative,
             expect,
             field: 1,
@@ -56,7 +55,7 @@ impl<'code, S: Style> ParseState<'code, S> {
 
     /// Pushes a new parsing step that parses the next field or to build the concatenation.
     pub(crate) fn push_next_field<N: ParseImpl<S>>(&mut self, expect: Expect, field: usize) {
-        self.parsers.push(ParseFn {
+        self.parsers.push(ParseStep {
             parse: N::parse_iterative,
             expect,
             field: field + 1,
@@ -66,7 +65,7 @@ impl<'code, S: Style> ParseState<'code, S> {
 
     /// Pushes a new parsing step that parses the same field again.
     pub(crate) fn push_repetition<N: ParseImpl<S>>(&mut self, expect: Expect, field: usize) {
-        self.parsers.push(ParseFn {
+        self.parsers.push(ParseStep {
             parse: N::parse_iterative,
             expect,
             field,
@@ -75,21 +74,23 @@ impl<'code, S: Style> ParseState<'code, S> {
     }
 }
 
+type ParseFn<S> = fn(
+    state: &mut ParseState<S>,
+    expect: Expect,
+    field: usize,
+    repetition: bool,
+) -> Result<(), <S as Style>::Error>;
+
 /// A single iterative parsing step.
 #[derive(Clone, Copy, Debug)]
-struct ParseFn<S: Style> {
-    parse: fn(
-        state: &mut ParseState<S>,
-        expect: Expect,
-        field: usize,
-        repetition: bool,
-    ) -> Result<(), S::Error>,
+struct ParseStep<S: Style> {
+    parse: ParseFn<S>,
     expect: Expect,
     field: usize,
     repetition: bool,
 }
 
-impl<S: Style> ParseFn<S> {
+impl<S: Style> ParseStep<S> {
     /// Calls the `parse` function.
     fn parse(self, state: &mut ParseState<S>) -> Result<(), S::Error> {
         (self.parse)(state, self.expect, self.field, self.repetition)
@@ -118,6 +119,9 @@ pub(crate) trait ParseImpl<S: Style>: Sized + ExpectedTokens {
 
     /// Used at the very end to pop the last node from the node stack.
     fn pop_final_node(nodes: &mut NodeStack<S>) -> Self;
+
+    /// Used by [`TinyParse::tiny_parse_fast()`].
+    fn parse_nested(lexer: &mut CheckedLexer<S>, expect: Expect) -> Result<Self, S::Error>;
 }
 
 pub(crate) trait Parse<S: Style>: ParseImpl<S> {
@@ -129,7 +133,7 @@ pub(crate) trait Parse<S: Style>: ParseImpl<S> {
     /// Keep in mind, that you might also want to limit the size of the input to some maximum to
     /// also effectively limit its execution time, so that it doesn't hang up the program.
     fn parse(code: &str) -> Result<Self, S::Error> {
-        let lexer = S::new_lexer(code);
+        let lexer = S::new_lexer(code)?;
         let lexer = CheckedLexer::<S>::new(lexer, Self::INITIAL_EXPECT)?;
         let mut state = ParseState::<S>::new(lexer);
         Self::parse_iterative(&mut state, Expect::END_OF_INPUT, 0, false)?;
@@ -144,30 +148,47 @@ pub(crate) trait Parse<S: Style>: ParseImpl<S> {
         assert!(state.nodes.finish(), "node stack should be empty");
         Ok(result)
     }
+
+    /// Parses recursively.
+    ///
+    /// This is very fast, but might lead to a stack overflow for deeply nested code. To avoid
+    /// crashes for e.g. untrusted input, use [`parser::Parse::parse()`].
+    ///
+    /// One could add a `max_recursion` limit here, but that can't really provide any guarantees,
+    /// since the stack might already be almost full despite a low limit.
+    ///
+    /// Additionally, I would have to duplicate a bunch of code, since I don't want this recursion
+    /// check to slow down parsing (even though it probably wouldn't be much). I might look into
+    /// this again in the future, but for now I'll keep it as is.
+    fn parse_fast(code: &str) -> Result<Self, S::Error> {
+        let lexer = S::new_lexer(code)?;
+        let mut lexer = CheckedLexer::new(lexer, Self::INITIAL_EXPECT)?;
+        Self::parse_nested(&mut lexer, Expect::END_OF_INPUT)
+    }
 }
 
 impl<S: Style, T: ParseImpl<S>> Parse<S> for T {}
 
 /// Recursively parses a node.
-macro_rules! tiny_parse_node {
+macro_rules! parse_node {
     ( $Node:ident $lexer:ident $expect:tt ) => {
-        $Node::<Tiny>::parse_nested($lexer, $expect)?
+        $Node::<S>::parse_nested($lexer, $expect)?
     };
 }
 
 /// Recursively parses a repetition of nodes.
-macro_rules! tiny_parse_node_repetition {
+macro_rules! parse_node_repetition {
     ( $Vec:ident $Node:ident $lexer:ident $expect:tt ) => { {
         let mut result = $Vec::new();
-        while $lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) {
-            result.push(tiny_parse_node!($Node $lexer $expect));
+        while $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) {
+            result.push(parse_node!($Node $lexer $expect));
         }
         result
     } };
 }
 
 /// Recursively parses a single field of a concatenation.
-macro_rules! tiny_parse_by_mode {
+macro_rules! parse_by_mode {
     ( [$Token:ident] $lexer:ident $expect:tt ) => {
         tokens::$Token::parse_required($lexer, $expect)?
     };
@@ -178,22 +199,22 @@ macro_rules! tiny_parse_by_mode {
         tokens::$Token::parse_repetition($lexer, $expect)?
     };
     ( ($Node:ident) $lexer:ident $expect:tt ) => {
-        tiny_parse_node!($Node $lexer $expect)
+        parse_node!($Node $lexer $expect)
     };
     ( ($Node:ident[]) $lexer:ident $expect:tt ) => {
-        Box::new(tiny_parse_node!($Node $lexer $expect))
+        Box::new(parse_node!($Node $lexer $expect))
     };
     ( ($Node:ident?) $lexer:ident $expect:tt ) => {
-        if $lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(tiny_parse_node!($Node $lexer $expect)) } else { None }
+        if $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) { Some(parse_node!($Node $lexer $expect)) } else { None }
     };
     ( ($Node:ident[?]) $lexer:ident $expect:tt ) => {
-        if $lexer.matches($Node::<Tiny>::EXPECTED_TOKENS.tokens) { Some(Box::new(tiny_parse_node!($Node $lexer $expect))) } else { None }
+        if $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) { Some(Box::new(parse_node!($Node $lexer $expect))) } else { None }
     };
     ( ($Node:ident*) $lexer:ident $expect:tt ) => {
-        tiny_parse_node_repetition!(SmallVec $Node $lexer $expect)
+        parse_node_repetition!(SmallVec $Node $lexer $expect)
     };
     ( ($Node:ident[*]) $lexer:ident $expect:tt ) => {
-        tiny_parse_node_repetition!(Vec $Node $lexer $expect)
+        parse_node_repetition!(Vec $Node $lexer $expect)
     };
 }
 
@@ -327,7 +348,7 @@ macro_rules! xor_token {
 /// Xors the expected tokens of the given node into the given token set.
 macro_rules! xor_node {
     ( $tokens:ident $Node:ident ) => {
-        let $tokens = $tokens.xor_without_ambiguity_const($Node::<Tiny>::EXPECTED_TOKENS);
+        let $tokens = $tokens.xor_without_ambiguity_const($Node::<S>::EXPECTED_TOKENS);
     };
 }
 
@@ -369,22 +390,22 @@ macro_rules! pop_field {
         tokens::$Token::pop_repetition($state)
     }};
     ( ($Node:ident) $state:ident ) => { paste! {
-        NodeStack::<Tiny>::pop(&mut $state.nodes.[<$Node:snake>])
+        NodeStack::<S>::pop(&mut $state.nodes.[<$Node:snake>])
     } };
     ( ($Node:ident[]) $state:ident ) => { paste! {
-        Box::new(NodeStack::<Tiny>::pop(&mut $state.nodes.[<$Node:snake>]))
+        Box::new(NodeStack::<S>::pop(&mut $state.nodes.[<$Node:snake>]))
     } };
     ( ($Node:ident?) $state:ident ) => { paste! {
-        NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>])
+        NodeStack::<S>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>])
     } };
     ( ($Node:ident[?]) $state:ident ) => { paste! {
-        NodeStack::<Tiny>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>]).map(Box::new)
+        NodeStack::<S>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>]).map(Box::new)
     } };
     ( ($Node:ident*) $state:ident ) => { paste! {
-        SmallVec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
+        SmallVec::from_iter(NodeStack::<S>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
     } };
     ( ($Node:ident[*]) $state:ident ) => { paste! {
-        Vec::from_iter(NodeStack::<Tiny>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
+        Vec::from_iter(NodeStack::<S>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
     } };
 }
 
@@ -603,12 +624,10 @@ macro_rules! impl_struct_parse {
             }
 
             impl_pop_final_node!($Name);
-        }
 
-        impl ParseFastImpl for $Name<Tiny> {
-            fn parse_nested(lexer: &mut CheckedLexer<Tiny>, expect: Expect) -> Result<Self, TinyError> {
+            fn parse_nested(lexer: &mut CheckedLexer<S>, expect: Expect) -> Result<Self, S::Error> {
                 Ok(Self { $( $field: {
-                    tiny_parse_by_mode!($Field lexer { expect_field!($Field $Name $field expect) })
+                    parse_by_mode!($Field lexer { expect_field!($Field $Name $field expect) })
                 }, )* })
             }
         }
@@ -722,7 +741,7 @@ macro_rules! impl_enum_parse {
                 if field == 1 {
                     #[allow(unused_variables)]
                     let node = match state.nodes.pop_kind() {
-                        $( NodeKind::$Node => Self::$Node(box_variant_if!({ NodeStack::<Tiny>::pop(&mut state.nodes.[<$Node:snake>]) } $( $mode )? )), )*
+                        $( NodeKind::$Node => Self::$Node(box_variant_if!({ NodeStack::<S>::pop(&mut state.nodes.[<$Node:snake>]) } $( $mode )? )), )*
                         _ => unreachable!("node should match one of the above cases"),
                     };
                     state.nodes.[<$Name:snake>].push(node);
@@ -738,7 +757,7 @@ macro_rules! impl_enum_parse {
 
                 state.push_build_enum::<Self>(expect);
 
-                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
+                $( if $Node::<S>::EXPECTED_TOKENS.tokens.contains(found) {
                     state.nodes.push_kind(NodeKind::$Node);
                     state.push_parser::<$Node<S>>(expect);
                     return Ok(());
@@ -748,18 +767,16 @@ macro_rules! impl_enum_parse {
             }
 
             impl_pop_final_node!($Name);
-        }
 
-        impl ParseFastImpl for $Name<Tiny> {
-            fn parse_nested(lexer: &mut CheckedLexer<Tiny>, expect: Expect) -> Result<Self, TinyError> {
+            fn parse_nested(lexer: &mut CheckedLexer<S>, expect: Expect) -> Result<Self, S::Error> {
                 let found = lexer.kind();
 
                 $( if found == TokenKind::$Token {
                     return Ok(Self::$Token(tokens::$Token::parse_required(lexer, expect)?));
                 } )*
 
-                $( if $Node::<Tiny>::EXPECTED_TOKENS.tokens.contains(found) {
-                    return Ok(Self::$Node(box_variant_if!({$Node::<Tiny>::parse_nested(lexer, expect)?} $( $mode )? )));
+                $( if $Node::<S>::EXPECTED_TOKENS.tokens.contains(found) {
+                    return Ok(Self::$Node(box_variant_if!({$Node::<S>::parse_nested(lexer, expect)?} $( $mode )? )));
                 } )*
 
                 unreachable!("token should match one of the above cases");
