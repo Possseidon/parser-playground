@@ -51,11 +51,16 @@ impl<'code> Lexer<'code> {
     }
 
     fn skip_whitespace(&mut self) -> Result<(), LexerError> {
-        self.pos += lex_whitespace(&self.code[self.pos..]).map_err(|error| LexerError {
-            pos: 0,
-            kind: error.into(),
-        })?;
-        Ok(())
+        loop {
+            let next = lex_whitespace(&self.code[self.pos..]).map_err(|kind| LexerError {
+                pos: self.pos,
+                kind: kind.into(),
+            })?;
+            if next == 0 {
+                break Ok(());
+            }
+            self.pos += next;
+        }
     }
 }
 
@@ -70,13 +75,14 @@ impl Iterator for Lexer<'_> {
         match self.next_token() {
             Ok(token) => {
                 if let Err(error) = self.skip_whitespace() {
-                    return Some(Err(error));
-                };
-                Some(Ok(token))
+                    Some(Err(error))
+                } else {
+                    Some(Ok(token))
+                }
             }
-            Err(error) => Some(Err(LexerError {
+            Err(kind) => Some(Err(LexerError {
                 pos: self.pos,
-                kind: error,
+                kind,
             })),
         }
     }
@@ -346,50 +352,45 @@ pub(crate) fn lex_keyword_or_ident(rest: &str) -> Option<(TokenKind, usize)> {
     )
 }
 
-/// Finds the first non-whitespace character.
+/// Returns the number of bytes until non-whitespace or a different kind of whitespace.
+///
+/// This does not simply skip everything at once, so that error messages can point to e.g. the
+/// beginning of an unterminated block comment.
 pub(crate) fn lex_whitespace(code: &str) -> Result<usize, Unterminated> {
-    let mut pos = 0;
-    loop {
-        match code[pos..].bytes().next() {
-            None => break Ok(code.len()),
-            Some(c) if c.is_ascii_whitespace() => {
-                pos = code[pos + 1..]
-                    .find(|c: char| !c.is_ascii_whitespace())
-                    .map_or(code.len(), |len| len + 1);
-            }
-            Some(b'/') => {
-                if code[pos + 1..].starts_with("//") {
-                    // doc-comments are not considered whitespace
-                    break Ok(pos);
-                }
-                if code[pos + 1..].starts_with('/') {
-                    pos = 2 + find_line_break(&code[pos + 2..]);
-                } else if code[pos + 1..].starts_with('*') {
-                    let start_len = code.len();
-                    let mut after_block_comment = &code[pos + 2..];
-                    let mut nesting: usize = 0;
-                    loop {
-                        let Some(len) = after_block_comment.find("*/") else {
-                            return Err(Unterminated::BlockComment);
-                        };
-                        if let Some(open) = after_block_comment[..len].find("/*") {
-                            after_block_comment = &after_block_comment[open + 2..];
-                            nesting += 1;
-                        } else {
-                            after_block_comment = &after_block_comment[len + 2..];
-                            if nesting == 0 {
-                                pos = start_len - after_block_comment.len();
-                                break;
-                            }
-                            nesting -= 1;
+    match code.bytes().next() {
+        Some(c) if c.is_ascii_whitespace() => Ok(code[1..]
+            .find(|c: char| !c.is_ascii_whitespace())
+            .map_or(code.len(), |len| len + 1)),
+        Some(b'/') => {
+            if code[1..].starts_with("//") {
+                // doc-comments are not considered whitespace
+                Ok(0)
+            } else if code[1..].starts_with('/') {
+                Ok(2 + find_line_break(&code[2..]))
+            } else if code[1..].starts_with('*') {
+                let start_len = code.len();
+                let mut after_block_comment = &code[2..];
+                let mut nesting: usize = 0;
+                loop {
+                    let Some(len) = after_block_comment.find("*/") else {
+                        break Err(Unterminated::BlockComment);
+                    };
+                    if let Some(open) = after_block_comment[..len].find("/*") {
+                        after_block_comment = &after_block_comment[open + 2..];
+                        nesting += 1;
+                    } else {
+                        after_block_comment = &after_block_comment[len + 2..];
+                        if nesting == 0 {
+                            break Ok(start_len - after_block_comment.len());
                         }
+                        nesting -= 1;
                     }
-                } else {
-                    break Ok(pos);
                 }
+            } else {
+                Ok(0)
             }
-            _ => break Ok(pos),
         }
+        _ => Ok(0),
     }
 }
 
@@ -561,9 +562,11 @@ mod tests {
         assert_eq!(lex_whitespace("// foo"), Ok(6));
         assert_eq!(lex_whitespace("// foo\n"), Ok(7));
         assert_eq!(lex_whitespace("// foo\nbar"), Ok(7));
+        assert_eq!(lex_whitespace("// foo\n "), Ok(7));
         assert_eq!(lex_whitespace("/// foo"), Ok(0));
         assert_eq!(lex_whitespace("/*foo bar*/"), Ok(11));
         assert_eq!(lex_whitespace("/*foo bar*/bar"), Ok(11));
+        assert_eq!(lex_whitespace("/*foo bar*/ "), Ok(11));
         assert_eq!(lex_whitespace("/*/"), Err(Unterminated::BlockComment));
         assert_eq!(lex_whitespace("/*/**/"), Err(Unterminated::BlockComment));
         assert_eq!(lex_whitespace("/*/**/*/"), Ok(8));
