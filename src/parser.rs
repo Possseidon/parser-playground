@@ -9,8 +9,8 @@ use crate::{
     lexer::{CheckedLexer, Lexer, LexerError},
     push_array::PushArray,
     token::{
-        tokens, Expect, NestedTokenSet, Pos, Style, Tiny, TokenKind, TokenStack, TokenStorage,
-        TryCodeSpan,
+        tokens, CodeSpan, Expect, Full, NestedTokenSet, Pos, Style, Tiny, TokenKind, TokenStack,
+        TokenStorage, TryCodeSpan,
     },
 };
 
@@ -169,6 +169,12 @@ pub(crate) trait Parse<S: Style>: ParseImpl<S> {
 
 impl<S: Style, T: ParseImpl<S>> Parse<S> for T {}
 
+impl<T: CodeSpan> CodeSpan for Box<T> {
+    fn code_span(&self) -> Range<usize> {
+        self.as_ref().code_span()
+    }
+}
+
 impl<T: TryCodeSpan> TryCodeSpan for Box<T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
         self.as_ref().try_code_span()
@@ -176,26 +182,51 @@ impl<T: TryCodeSpan> TryCodeSpan for Box<T> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct OptionalNode<S: Style, T> {
+pub(crate) struct OptionalNode<S: Style, T> {
     pub(crate) pos: S::Pos,
     pub(crate) node: Option<T>,
 }
 
+impl<T: CodeSpan> CodeSpan for OptionalNode<Full, T> {
+    fn code_span(&self) -> Range<usize> {
+        let start = self.pos;
+        let end = if let Some(node) = &self.node {
+            node.code_span().end
+        } else {
+            start
+        };
+        Range { start, end }
+    }
+}
+
 impl<S: Style, T: TryCodeSpan> TryCodeSpan for OptionalNode<S, T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
-        if let Some(node) = &self.node {
-            node.try_code_span()
+        let start = self.pos.try_into().ok()?;
+        let end = if let Some(node) = &self.node {
+            node.try_code_span()?.end
         } else {
-            let start = self.pos.try_into().ok()?;
-            Some(Range { start, end: start })
-        }
+            start
+        };
+        Some(Range { start, end })
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SmallNodeRepetition<S: Style, T> {
+pub(crate) struct SmallNodeRepetition<S: Style, T> {
     pub(crate) pos: S::Pos,
     pub(crate) nodes: SmallVec<[T; 1]>,
+}
+
+impl<T: CodeSpan> CodeSpan for SmallNodeRepetition<Full, T> {
+    fn code_span(&self) -> Range<usize> {
+        let start = self.pos;
+        let end = if let Some(last) = self.nodes.last() {
+            last.code_span().end
+        } else {
+            start
+        };
+        Range { start, end }
+    }
 }
 
 impl<S: Style, T: TryCodeSpan> TryCodeSpan for SmallNodeRepetition<S, T> {
@@ -211,9 +242,21 @@ impl<S: Style, T: TryCodeSpan> TryCodeSpan for SmallNodeRepetition<S, T> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct NodeRepetition<S: Style, T> {
+pub(crate) struct NodeRepetition<S: Style, T> {
     pub(crate) pos: S::Pos,
     pub(crate) nodes: Vec<T>,
+}
+
+impl<T: CodeSpan> CodeSpan for NodeRepetition<Full, T> {
+    fn code_span(&self) -> Range<usize> {
+        let start = self.pos;
+        let end = if let Some(last) = self.nodes.last() {
+            last.code_span().end
+        } else {
+            start
+        };
+        Range { start, end }
+    }
 }
 
 impl<S: Style, T: TryCodeSpan> TryCodeSpan for NodeRepetition<S, T> {
@@ -748,6 +791,14 @@ macro_rules! impl_struct_parse {
             }
         }
 
+        impl CodeSpan for $Name<Full> {
+            fn code_span(&self) -> Range<usize> {
+                let (first, ..) = ( $( &self.$field, )* );
+                let (.., last) = ( $( &self.$field, )* );
+                first.code_span().start..last.code_span().end
+            }
+        }
+
         impl<S: Style> TryCodeSpan for $Name<S> {
             fn try_code_span(&self) -> Option<Range<usize>> {
                 let (first, ..) = ( $( &self.$field, )* );
@@ -897,6 +948,15 @@ macro_rules! impl_enum_parse {
                 } )*
 
                 unreachable!("token should match one of the above cases");
+            }
+        }
+
+        impl CodeSpan for $Name<Full> {
+            fn code_span(&self) -> Range<usize> {
+                match self {
+                    $( Self::$Node(node) => node.code_span(), )*
+                    $( Self::$Token(token) => token.code_span(), )*
+                }
             }
         }
 

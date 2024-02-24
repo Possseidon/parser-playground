@@ -836,6 +836,10 @@ impl From<TokenKind> for NestedTokenSet {
     }
 }
 
+pub(crate) trait CodeSpan {
+    fn code_span(&self) -> Range<usize>;
+}
+
 pub(crate) trait TryCodeSpan {
     fn try_code_span(&self) -> Option<Range<usize>>;
 }
@@ -846,8 +850,8 @@ pub(crate) struct TokenSpan {
     pub(crate) len: NonZeroUsize,
 }
 
-impl TokenSpan {
-    pub(crate) fn code_span(self) -> Range<usize> {
+impl CodeSpan for TokenSpan {
+    fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
             end: self.pos + self.len.get(),
@@ -867,8 +871,8 @@ pub(crate) struct OptionalTokenSpan {
     pub(crate) len: Option<NonZeroUsize>,
 }
 
-impl OptionalTokenSpan {
-    pub(crate) fn code_span(self) -> Range<usize> {
+impl CodeSpan for OptionalTokenSpan {
+    fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
             end: self.pos + self.len.map_or(0, |len| len.get()),
@@ -888,7 +892,7 @@ pub(crate) struct TokenSpanRepetition {
     pub(crate) tokens: SmallVec<[TokenSpan; 1]>,
 }
 
-impl TokenSpanRepetition {
+impl CodeSpan for TokenSpanRepetition {
     fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
@@ -912,8 +916,8 @@ pub(crate) struct FixedTokenSpan<const N: usize> {
     pub(crate) pos: usize,
 }
 
-impl<const N: usize> FixedTokenSpan<N> {
-    fn code_span(self) -> Range<usize> {
+impl<const N: usize> CodeSpan for FixedTokenSpan<N> {
+    fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
             end: self.pos + N,
@@ -933,8 +937,8 @@ pub(crate) struct FixedOptionalTokenSpan<const N: usize> {
     pub(crate) some: bool,
 }
 
-impl<const N: usize> FixedOptionalTokenSpan<N> {
-    fn code_span(self) -> Range<usize> {
+impl<const N: usize> CodeSpan for FixedOptionalTokenSpan<N> {
+    fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
             end: self.pos + if self.some { N } else { 0 },
@@ -954,7 +958,7 @@ pub(crate) struct FixedTokenSpanRepetition<const N: usize> {
     pub(crate) tokens: SmallVec<[FixedTokenSpan<N>; 1]>,
 }
 
-impl<const N: usize> FixedTokenSpanRepetition<N> {
+impl<const N: usize> CodeSpan for FixedTokenSpanRepetition<N> {
     fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
