@@ -9,7 +9,7 @@ use crate::{
     lexer::{CheckedLexer, Lexer, LexerError},
     push_array::PushArray,
     token::{
-        tokens, Expect, NestedTokenSet, Style, Tiny, TokenKind, TokenStack, TokenStorage,
+        tokens, Expect, NestedTokenSet, Pos, Style, Tiny, TokenKind, TokenStack, TokenStorage,
         TryCodeSpan,
     },
 };
@@ -169,6 +169,65 @@ pub(crate) trait Parse<S: Style>: ParseImpl<S> {
 
 impl<S: Style, T: ParseImpl<S>> Parse<S> for T {}
 
+impl<T: TryCodeSpan> TryCodeSpan for Box<T> {
+    fn try_code_span(&self) -> Option<Range<usize>> {
+        self.as_ref().try_code_span()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OptionalNode<S: Style, T> {
+    pub(crate) pos: S::Pos,
+    pub(crate) node: Option<T>,
+}
+
+impl<S: Style, T: TryCodeSpan> TryCodeSpan for OptionalNode<S, T> {
+    fn try_code_span(&self) -> Option<Range<usize>> {
+        if let Some(node) = &self.node {
+            node.try_code_span()
+        } else {
+            let start = self.pos.try_into().ok()?;
+            Some(Range { start, end: start })
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SmallNodeRepetition<S: Style, T> {
+    pub(crate) pos: S::Pos,
+    pub(crate) nodes: SmallVec<[T; 1]>,
+}
+
+impl<S: Style, T: TryCodeSpan> TryCodeSpan for SmallNodeRepetition<S, T> {
+    fn try_code_span(&self) -> Option<Range<usize>> {
+        let start = self.pos.try_into().ok()?;
+        let end = if let Some(last) = self.nodes.last() {
+            last.try_code_span()?.end
+        } else {
+            start
+        };
+        Some(Range { start, end })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NodeRepetition<S: Style, T> {
+    pub(crate) pos: S::Pos,
+    pub(crate) nodes: Vec<T>,
+}
+
+impl<S: Style, T: TryCodeSpan> TryCodeSpan for NodeRepetition<S, T> {
+    fn try_code_span(&self) -> Option<Range<usize>> {
+        let start = self.pos.try_into().ok()?;
+        let end = if let Some(last) = self.nodes.last() {
+            last.try_code_span()?.end
+        } else {
+            start
+        };
+        Some(Range { start, end })
+    }
+}
+
 /// Recursively parses a node.
 macro_rules! parse_node {
     ( $Node:ident $lexer:ident $expect:tt ) => {
@@ -178,10 +237,13 @@ macro_rules! parse_node {
 
 /// Recursively parses a repetition of nodes.
 macro_rules! parse_node_repetition {
-    ( $Vec:ident $Node:ident $lexer:ident $expect:tt ) => { {
-        let mut result = $Vec::new();
+    ( $Repetition:ident $Node:ident $lexer:ident $expect:tt ) => { {
+        let mut result = $Repetition {
+            pos: $lexer.pos().into(),
+            nodes: Default::default(),
+        };
         while $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) {
-            result.push(parse_node!($Node $lexer $expect));
+            result.nodes.push(parse_node!($Node $lexer $expect));
         }
         result
     } };
@@ -205,30 +267,42 @@ macro_rules! parse_by_mode {
         Box::new(parse_node!($Node $lexer $expect))
     };
     ( ($Node:ident?) $lexer:ident $expect:tt ) => {
-        if $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) { Some(parse_node!($Node $lexer $expect)) } else { None }
+        OptionalNode {
+            pos: $lexer.pos().into(),
+            node: if $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) { Some(parse_node!($Node $lexer $expect)) } else { None },
+        }
     };
     ( ($Node:ident[?]) $lexer:ident $expect:tt ) => {
-        if $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) { Some(Box::new(parse_node!($Node $lexer $expect))) } else { None }
+        OptionalNode {
+            pos: $lexer.pos().into(),
+            node: if $lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) { Some(Box::new(parse_node!($Node $lexer $expect))) } else { None },
+        }
     };
     ( ($Node:ident*) $lexer:ident $expect:tt ) => {
-        parse_node_repetition!(SmallVec $Node $lexer $expect)
+        parse_node_repetition!(SmallNodeRepetition $Node $lexer $expect)
     };
     ( ($Node:ident[*]) $lexer:ident $expect:tt ) => {
-        parse_node_repetition!(Vec $Node $lexer $expect)
+        parse_node_repetition!(NodeRepetition $Node $lexer $expect)
     };
 }
 
 /// Iteratively parses a repetition of tokens or nodes.
 macro_rules! parse_node_repetition_iterative {
-    ( $Node:ident $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => { paste! {
-        if !$repetition {
-            NodeStack::<S>::start_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]);
+    ( $Node:ident $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
+        paste! {
+            if !$repetition {
+                NodeStack::<S>::start_repetition(
+                    &mut $state.nodes._data,
+                    $state.lexer.pos().into(),
+                    &mut $state.nodes.[<$Node:snake>],
+                );
+            }
+            if $state.lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) {
+                $state.push_repetition::<Self>($original_expect, $field);
+                $state.push_parser::<$Node<S>>($expect);
+            }
         }
-        if $state.lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) {
-            $state.push_repetition::<Self>($original_expect, $field);
-            $state.push_parser::<$Node<S>>($expect);
-        }
-    } };
+    };
 }
 
 /// Iteratively parses a single field of a concatenation.
@@ -247,10 +321,10 @@ macro_rules! parse_by_mode_iterative {
     };
     ( ($Node:ident?) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
         if $state.lexer.matches($Node::<S>::EXPECTED_TOKENS.tokens) {
-            $state.nodes.push_some();
+            $state.nodes.push_some($state.lexer.pos().into());
             $state.push_parser::<$Node<S>>($expect);
         } else {
-            $state.nodes.push_none();
+            $state.nodes.push_none($state.lexer.pos().into());
         }
     };
     ( ($Node:ident[?]) $state:ident $original_expect:ident $field:ident $repetition:ident $expect:tt ) => {
@@ -370,11 +444,11 @@ macro_rules! field_type {
     ( [$Token:ident?] ) => { <tokens::$Token as TokenStorage<S>>::Optional };
     ( [$Token:ident*] ) => { <tokens::$Token as TokenStorage<S>>::Repetition };
     ( ($Node:ident) ) => { $Node<S> };
-    ( ($Node:ident[]) ) => { Box<$Node<S>> }; // TODO: just CodeSpan implement for Box<T>
-    ( ($Node:ident?) ) => { Option<$Node<S>> }; // TODO: custom type with pos (usize if Style == Full; () otherwise)
-    ( ($Node:ident[?]) ) => { Option<Box<$Node<S>>> }; // TODO: re-use new CustomOption<T> replacement
-    ( ($Node:ident*) ) => { SmallVec<[$Node<S>; 1]> }; // TODO: custom type with pos (usize if Style == Full; () otherwise)
-    ( ($Node:ident[*]) ) => { Vec<$Node<S>> }; // TODO: custom type with pos (usize if Style == Full; () otherwise)
+    ( ($Node:ident[]) ) => { Box<$Node<S>> };
+    ( ($Node:ident?) ) => { OptionalNode<S, $Node<S>> };
+    ( ($Node:ident[?]) ) => { OptionalNode<S, Box<$Node<S>>> };
+    ( ($Node:ident*) ) => { SmallNodeRepetition<S, $Node<S>> };
+    ( ($Node:ident[*]) ) => { NodeRepetition<S, $Node<S>> };
 }
 
 /// Pops a concatenation field from the node/token stack.
@@ -388,24 +462,60 @@ macro_rules! pop_field {
     ( [$Token:ident*] $state:ident ) => {{
         tokens::$Token::pop_repetition($state)
     }};
-    ( ($Node:ident) $state:ident ) => { paste! {
-        NodeStack::<S>::pop(&mut $state.nodes.[<$Node:snake>])
-    } };
-    ( ($Node:ident[]) $state:ident ) => { paste! {
-        Box::new(NodeStack::<S>::pop(&mut $state.nodes.[<$Node:snake>]))
-    } };
-    ( ($Node:ident?) $state:ident ) => { paste! {
-        NodeStack::<S>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>])
-    } };
-    ( ($Node:ident[?]) $state:ident ) => { paste! {
-        NodeStack::<S>::pop_optional(&mut $state.nodes._optional, &mut $state.nodes.[<$Node:snake>]).map(Box::new)
-    } };
-    ( ($Node:ident*) $state:ident ) => { paste! {
-        SmallVec::from_iter(NodeStack::<S>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
-    } };
-    ( ($Node:ident[*]) $state:ident ) => { paste! {
-        Vec::from_iter(NodeStack::<S>::pop_repetition(&mut $state.nodes._repetition, &mut $state.nodes.[<$Node:snake>]))
-    } };
+    ( ($Node:ident) $state:ident ) => {
+        paste! {
+            NodeStack::<S>::pop(&mut $state.nodes.[<$Node:snake>])
+        }
+    };
+    ( ($Node:ident[]) $state:ident ) => {
+        paste! {
+            Box::new(NodeStack::<S>::pop(&mut $state.nodes.[<$Node:snake>]))
+        }
+    };
+    ( ($Node:ident?) $state:ident ) => {
+        paste! {{
+            let (pos, node) = NodeStack::<S>::pop_optional(
+                &mut $state.nodes._data,
+                &mut $state.nodes._optional,
+                &mut $state.nodes.[<$Node:snake>],
+            );
+            OptionalNode { pos, node }
+        }}
+    };
+    ( ($Node:ident[?]) $state:ident ) => {
+        paste! {
+            let (pos, node) = NodeStack::<S>::pop_optional(
+                &mut $state.nodes._data,
+                &mut $state.nodes._optional,
+                &mut $state.nodes.[<$Node:snake>],
+            );
+            OptionalNode { pos, node: node.map(Box::new) }
+        }
+    };
+    ( ($Node:ident*) $state:ident ) => {
+        paste! {{
+            let (pos, nodes) = NodeStack::<S>::pop_repetition(
+                &mut $state.nodes._data,
+                &mut $state.nodes.[<$Node:snake>],
+            );
+            SmallNodeRepetition {
+                pos,
+                nodes: SmallVec::from_iter(nodes),
+            }
+        }}
+    };
+    ( ($Node:ident[*]) $state:ident ) => {
+        paste! {{
+            let (pos, nodes) = NodeStack::<S>::pop_repetition(
+                &mut $state.nodes._data,
+                &mut $state.nodes.[<$Node:snake>],
+            );
+            NodeRepetition {
+                pos,
+                nodes: Vec::from_iter(nodes),
+            }
+        }}
+    };
 }
 
 /// Implements `pop_final_node` for the given concatenation or alternation.
@@ -431,7 +541,7 @@ macro_rules! drain_field_into_dropped_nodes {
     };
     ( ($Node:ident?) $nodes:ident $self:ident $field:ident ) => {
         paste! {
-            $self.$field.as_mut().map(|node| node.drain_into_dropped_nodes($nodes));
+            $self.$field.node.as_mut().map(|node| node.drain_into_dropped_nodes($nodes));
         }
     };
     ( ($Node:ident[?]) $nodes:ident $self:ident $field:ident ) => {
@@ -441,12 +551,12 @@ macro_rules! drain_field_into_dropped_nodes {
     };
     ( ($Node:ident*) $nodes:ident $self:ident $field:ident ) => {
         paste! {
-            $nodes.[<$Node:snake>].extend($self.$field.drain(..));
+            $nodes.[<$Node:snake>].extend($self.$field.nodes.drain(..));
         }
     };
     ( ($Node:ident[*]) $nodes:ident $self:ident $field:ident ) => {
         paste! {
-            $nodes.[<$Node:snake>].extend($self.$field.drain(..));
+            $nodes.[<$Node:snake>].extend($self.$field.nodes.drain(..));
         }
     };
 }
@@ -642,8 +752,7 @@ macro_rules! impl_struct_parse {
             fn try_code_span(&self) -> Option<Range<usize>> {
                 let (first, ..) = ( $( &self.$field, )* );
                 let (.., last) = ( $( &self.$field, )* );
-                // Some(first.try_code_span()?.start..last.try_code_span()?.end)
-                todo!()
+                Some(first.try_code_span()?.start..last.try_code_span()?.end)
             }
         }
     } };
@@ -820,7 +929,7 @@ macro_rules! impl_node_parse {
             $( [<$Name:snake>]: Vec<$Name<S>>, )*
             _kinds: NodeKinds,
             _optional: BitVec,
-            _repetition: Repetition,
+            _data: Data,
         }
 
         impl<S: Style> NodeStack<S> {
@@ -830,7 +939,7 @@ macro_rules! impl_node_parse {
                     $( [<$Name:snake>]: Vec::new(), )*
                     _kinds: NodeKinds::new(),
                     _optional: BitVec::new(),
-                    _repetition: Repetition::new(),
+                    _data: Data::new(),
                 }
             }
 
@@ -838,7 +947,7 @@ macro_rules! impl_node_parse {
             /// at the end of parsing.
             pub(crate) fn finish(self) -> bool {
                 self._optional.is_empty()
-                    && self._repetition.is_empty()
+                    && self._data.is_empty()
                     && $( self.[<$Name:snake>].is_empty() )&&*
             }
         }
@@ -956,8 +1065,8 @@ macro_rules! impl_node_parse {
 type NodeKinds = SmallVec<[NodeKind; 16]>;
 const _: () = assert!(std::mem::size_of::<NodeKinds>() <= 24);
 
-/// A list of repetition-end markers.
-type Repetition = SmallVec<[usize; 2]>;
+/// A list of pos and repetition-end markers.
+type Data = SmallVec<[usize; 2]>;
 
 impl<S: Style> Default for NodeStack<S> {
     fn default() -> Self {
@@ -997,43 +1106,68 @@ impl<S: Style> NodeStack<S> {
     /// Pushes a new marker for an optional node that exists.
     ///
     /// This should therefore be accompanied by pushing of the actual node and kind.
-    fn push_some(&mut self) {
+    fn push_some(&mut self, pos: S::Pos) {
+        if let Ok(pos) = pos.try_into() {
+            self._data.push(pos);
+        }
         self._optional.push(true);
     }
 
     /// Pushes a new marker for an optional node that does not exist.
     ///
     /// No node or kind must be pushed in this case.
-    fn push_none(&mut self) {
+    fn push_none(&mut self, pos: S::Pos) {
+        if let Ok(pos) = pos.try_into() {
+            self._data.push(pos);
+        }
         self._optional.push(false);
     }
 
     /// Pops an optional node from the given stack.
     ///
     /// `optional` is passed in manually to avoid multiple mutable borrows to `self`.
-    fn pop_optional<T>(optional: &mut BitVec, fields: &mut Vec<T>) -> Option<T> {
-        optional
-            .pop()
-            .expect("optional should not be empty")
-            .then(|| Self::pop(fields))
+    fn pop_optional<T>(
+        data: &mut Data,
+        optional: &mut BitVec,
+        fields: &mut Vec<T>,
+    ) -> (S::Pos, Option<T>) {
+        (
+            Self::pop_pos(data),
+            optional
+                .pop()
+                .expect("optional should not be empty")
+                .then(|| Self::pop(fields)),
+        )
     }
 
     /// Marks the start of a new repetition of a specific kind of node.
     ///
     /// `repetition` is passed in manually to avoid multiple mutable borrows to `self`.
-    fn start_repetition<T>(repetition: &mut Repetition, fields: &[T]) {
+    fn start_repetition<T>(repetition: &mut Data, pos: S::Pos, fields: &[T]) {
         repetition.push(fields.len());
+        if let Ok(pos) = pos.try_into() {
+            repetition.push(pos);
+        }
     }
 
     /// Pops a repetition of a specific kind of node as an [`ExactSizeIterator`].
     ///
     /// `repetition` is passed in manually to avoid multiple mutable borrows to `self`.
     fn pop_repetition<'a, T>(
-        repetition: &mut SmallVec<[usize; 2]>,
+        data: &mut Data,
         fields: &'a mut Vec<T>,
-    ) -> impl ExactSizeIterator<Item = T> + 'a {
-        let start = repetition.pop().expect("repetitions should not be empty");
-        fields.drain(start..)
+    ) -> (S::Pos, impl ExactSizeIterator<Item = T> + 'a) {
+        let pos = Self::pop_pos(data);
+        let start = data.pop().expect("data should not be empty");
+        (pos, fields.drain(start..))
+    }
+
+    fn pop_pos(data: &mut Data) -> S::Pos {
+        if S::Pos::FULL {
+            data.pop().expect("data should not be empty").into()
+        } else {
+            Default::default()
+        }
     }
 }
 

@@ -408,10 +408,43 @@ impl FixedTokenKind {
     }
 }
 
+pub(crate) trait Pos:
+    Clone + Copy + fmt::Debug + Default + PartialEq + Eq + TryInto<usize> + From<usize>
+{
+    const FULL: bool;
+}
+
+impl Pos for usize {
+    const FULL: bool = true;
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NoPos;
+
+impl TryFrom<NoPos> for usize {
+    type Error = ();
+
+    fn try_from(_value: NoPos) -> Result<Self, Self::Error> {
+        Err(())
+    }
+}
+
+impl From<usize> for NoPos {
+    fn from(_value: usize) -> Self {
+        Self
+    }
+}
+
+impl Pos for NoPos {
+    const FULL: bool = false;
+}
+
 pub(crate) trait Style: Clone + fmt::Debug + PartialEq + Eq {
     type FixedRequired<const N: usize>: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
     type FixedOptional<const N: usize>: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
     type FixedRepetition<const N: usize>: Clone + fmt::Debug + PartialEq + Eq + TryCodeSpan;
+
+    type Pos: Pos;
 
     fn fixed_required<const N: usize>(
         lexer: &mut CheckedLexer,
@@ -463,6 +496,8 @@ impl Style for Tiny {
     type FixedRequired<const N: usize> = TinyToken;
     type FixedOptional<const N: usize> = TinyOptionalToken;
     type FixedRepetition<const N: usize> = TinyTokenRepetition;
+
+    type Pos = NoPos;
 
     fn fixed_required<const N: usize>(
         lexer: &mut CheckedLexer,
@@ -561,6 +596,8 @@ impl Style for Full {
     type FixedRequired<const N: usize> = FixedTokenSpan<N>;
     type FixedOptional<const N: usize> = FixedOptionalTokenSpan<N>;
     type FixedRepetition<const N: usize> = FixedTokenSpanRepetition<N>;
+
+    type Pos = usize;
 
     fn fixed_required<const N: usize>(
         lexer: &mut CheckedLexer,

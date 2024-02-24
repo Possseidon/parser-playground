@@ -7,7 +7,7 @@ use std::{hint::black_box, time::Instant};
 
 use crate::{
     parser::{Parse, Test},
-    token::{Positioned, Tiny},
+    token::{Full, Tiny},
 };
 
 fn measure<T>(code: &str, f: impl Fn(&str) -> T) -> std::time::Duration {
@@ -34,8 +34,8 @@ fn main() {
 
     dbg!(measure(&code, |code| Test::<Tiny>::parse_fast(code).unwrap()));
     dbg!(measure(&code, |code| Test::<Tiny>::parse(code).unwrap()));
-    dbg!(measure(&code, |code| Test::<Positioned>::parse_fast(code).unwrap()));
-    dbg!(measure(&code, |code| Test::<Positioned>::parse(code).unwrap()));
+    dbg!(measure(&code, |code| Test::<Full>::parse_fast(code).unwrap()));
+    dbg!(measure(&code, |code| Test::<Full>::parse(code).unwrap()));
 
     // println!("{test:#?}");
 }
