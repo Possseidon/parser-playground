@@ -1,4 +1,4 @@
-use std::{fmt, num::NonZeroUsize, ops::Range};
+use std::{fmt, marker::PhantomData, num::NonZeroUsize, ops::Range};
 
 use bitvec::vec::BitVec;
 use enum_map::Enum;
@@ -9,6 +9,10 @@ use crate::{
     lexer::{CheckedLexer, LexerError},
     parser::ParseState,
 };
+
+pub(crate) trait FixedToken: Clone + Copy + fmt::Debug + PartialEq + Eq {
+    const TEXT: &'static str;
+}
 
 macro_rules! impl_token_kind {
     (
@@ -115,8 +119,9 @@ macro_rules! impl_token_kind {
 
         pub(crate) mod tokens {
             use super::{
-                CheckedLexer, Expect, FixedTokenKind, LexerError, OptionalTokenSpan, ParseState,
-                SmallVec, Style, TokenKind, TokenSpan, TokenSpanRepetition, TokenStorage,
+                CheckedLexer, Expect, FixedToken, FixedTokenKind, LexerError, OptionalTokenSpan,
+                ParseState, SmallVec, Style, TokenKind, TokenSpan, TokenSpanRepetition,
+                TokenStorage,
             };
 
             $(
@@ -219,16 +224,17 @@ macro_rules! impl_token_kind {
 
 macro_rules! impl_fixed_token_kind {
     ( $( $Kind:ident )* ) => { $(
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(crate) struct $Kind;
 
-        impl $Kind {
-            const LEN: usize = FixedTokenKind::$Kind.text().len();
+        impl FixedToken for $Kind {
+            const TEXT: &'static str = FixedTokenKind::$Kind.text();
         }
 
         impl<S: Style> TokenStorage<S> for $Kind {
-            type Required = S::FixedRequired<{ Self::LEN }>;
-            type Optional = S::FixedOptional<{ Self::LEN }>;
-            type Repetition = S::FixedRepetition<{ Self::LEN }>;
+            type Required = S::FixedRequired<Self>;
+            type Optional = S::FixedOptional<Self>;
+            type Repetition = S::FixedRepetition<Self>;
         }
 
         impl $Kind {
@@ -243,7 +249,7 @@ macro_rules! impl_fixed_token_kind {
                 parser: &mut ParseState<S>,
                 expect: Expect,
             ) -> Result<(), LexerError> {
-                S::push_fixed_required::<{ Self::LEN }>(parser, expect)
+                S::push_fixed_required::<Self>(parser, expect)
             }
 
             pub(crate) fn pop_required<S: Style>(
@@ -263,7 +269,7 @@ macro_rules! impl_fixed_token_kind {
                 parser: &mut ParseState<S>,
                 expect: Expect,
             ) -> Result<(), LexerError> {
-                S::push_fixed_optional::<{ Self::LEN }>(parser, TokenKind::$Kind, expect)
+                S::push_fixed_optional::<Self>(parser, TokenKind::$Kind, expect)
             }
 
             pub(crate) fn pop_optional<S: Style>(
@@ -283,7 +289,7 @@ macro_rules! impl_fixed_token_kind {
                 parser: &mut ParseState<S>,
                 expect: Expect,
             ) -> Result<(), LexerError> {
-                S::push_fixed_repetition::<{ Self::LEN }>(parser, TokenKind::$Kind, expect)
+                S::push_fixed_repetition::<Self>(parser, TokenKind::$Kind, expect)
             }
 
             pub(crate) fn pop_repetition<S: Style>(
@@ -440,74 +446,76 @@ impl Pos for NoPos {
 }
 
 pub(crate) trait Style: Clone + fmt::Debug + PartialEq + Eq {
-    type FixedRequired<const N: usize>: RequiredToken;
-    type FixedOptional<const N: usize>: OptionalToken;
-    type FixedRepetition<const N: usize>: TokenRepetition;
+    type FixedRequired<T: FixedToken>: RequiredToken;
+    type FixedOptional<T: FixedToken>: OptionalToken;
+    type FixedRepetition<T: FixedToken>: TokenRepetition;
 
     type Pos: Pos;
 
-    fn fixed_required<const N: usize>(
+    fn fixed_required<T: FixedToken>(
         lexer: &mut CheckedLexer,
         expect: Expect,
-    ) -> Result<Self::FixedRequired<N>, LexerError>;
+    ) -> Result<Self::FixedRequired<T>, LexerError>;
 
-    fn push_fixed_required<const N: usize>(
+    fn push_fixed_required<T: FixedToken>(
         state: &mut ParseState<Self>,
         expect: Expect,
     ) -> Result<(), LexerError>;
 
-    fn pop_fixed_required<const N: usize>(state: &mut ParseState<Self>) -> Self::FixedRequired<N>;
+    fn pop_fixed_required<T: FixedToken>(state: &mut ParseState<Self>) -> Self::FixedRequired<T>;
 
-    fn fixed_optional<const N: usize>(
+    fn fixed_optional<T: FixedToken>(
         lexer: &mut CheckedLexer,
         kind: TokenKind,
         expect: Expect,
-    ) -> Result<Self::FixedOptional<N>, LexerError>;
+    ) -> Result<Self::FixedOptional<T>, LexerError>;
 
-    fn push_fixed_optional<const N: usize>(
-        state: &mut ParseState<Self>,
-        kind: TokenKind,
-        expect: Expect,
-    ) -> Result<(), LexerError>;
-
-    fn pop_fixed_optional<const N: usize>(state: &mut ParseState<Self>) -> Self::FixedOptional<N>;
-
-    fn fixed_repetition<const N: usize>(
-        lexer: &mut CheckedLexer,
-        kind: TokenKind,
-        expect: Expect,
-    ) -> Result<Self::FixedRepetition<N>, LexerError>;
-
-    fn push_fixed_repetition<const N: usize>(
+    fn push_fixed_optional<T: FixedToken>(
         state: &mut ParseState<Self>,
         kind: TokenKind,
         expect: Expect,
     ) -> Result<(), LexerError>;
 
-    fn pop_fixed_repetition<const N: usize>(
+    fn pop_fixed_optional<T: FixedToken>(state: &mut ParseState<Self>) -> Self::FixedOptional<T>;
+
+    fn fixed_repetition<T: FixedToken>(
+        lexer: &mut CheckedLexer,
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<Self::FixedRepetition<T>, LexerError>;
+
+    fn push_fixed_repetition<T: FixedToken>(
         state: &mut ParseState<Self>,
-    ) -> Self::FixedRepetition<N>;
+        kind: TokenKind,
+        expect: Expect,
+    ) -> Result<(), LexerError>;
+
+    fn pop_fixed_repetition<T: FixedToken>(
+        state: &mut ParseState<Self>,
+    ) -> Self::FixedRepetition<T>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Tiny;
 
 impl Style for Tiny {
-    type FixedRequired<const N: usize> = TinyToken;
-    type FixedOptional<const N: usize> = TinyOptionalToken;
-    type FixedRepetition<const N: usize> = TinyTokenRepetition;
+    type FixedRequired<T: FixedToken> = TinyToken<T>;
+    type FixedOptional<T: FixedToken> = TinyOptionalToken<T>;
+    type FixedRepetition<T: FixedToken> = TinyTokenRepetition<T>;
 
     type Pos = NoPos;
 
-    fn fixed_required<const N: usize>(
+    fn fixed_required<T: FixedToken>(
         lexer: &mut CheckedLexer,
         expect: Expect,
-    ) -> Result<Self::FixedRequired<N>, LexerError> {
+    ) -> Result<Self::FixedRequired<T>, LexerError> {
         lexer.next(expect)?;
-        Ok(TinyToken)
+        Ok(TinyToken {
+            _phantom: PhantomData,
+        })
     }
 
-    fn push_fixed_required<const N: usize>(
+    fn push_fixed_required<T: FixedToken>(
         state: &mut ParseState<Self>,
         expect: Expect,
     ) -> Result<(), LexerError> {
@@ -516,24 +524,29 @@ impl Style for Tiny {
         Ok(())
     }
 
-    fn pop_fixed_required<const N: usize>(_state: &mut ParseState<Self>) -> Self::FixedRequired<N> {
+    fn pop_fixed_required<T: FixedToken>(_state: &mut ParseState<Self>) -> Self::FixedRequired<T> {
         // pop nothing
-        TinyToken
+        TinyToken {
+            _phantom: PhantomData,
+        }
     }
 
-    fn fixed_optional<const N: usize>(
+    fn fixed_optional<T: FixedToken>(
         lexer: &mut CheckedLexer,
         kind: TokenKind,
         expect: Expect,
-    ) -> Result<Self::FixedOptional<N>, LexerError> {
+    ) -> Result<Self::FixedOptional<T>, LexerError> {
         let some = lexer.matches(kind);
         if some {
             lexer.next(expect)?;
         }
-        Ok(TinyOptionalToken { some })
+        Ok(TinyOptionalToken {
+            some,
+            _phantom: PhantomData,
+        })
     }
 
-    fn push_fixed_optional<const N: usize>(
+    fn push_fixed_optional<T: FixedToken>(
         state: &mut ParseState<Self>,
         kind: TokenKind,
         expect: Expect,
@@ -547,26 +560,30 @@ impl Style for Tiny {
         Ok(())
     }
 
-    fn pop_fixed_optional<const N: usize>(state: &mut ParseState<Self>) -> Self::FixedOptional<N> {
+    fn pop_fixed_optional<T: FixedToken>(state: &mut ParseState<Self>) -> Self::FixedOptional<T> {
         TinyOptionalToken {
             some: state.tokens.pop_tiny_fixed_optional(),
+            _phantom: PhantomData,
         }
     }
 
-    fn fixed_repetition<const N: usize>(
+    fn fixed_repetition<T: FixedToken>(
         lexer: &mut CheckedLexer,
         kind: TokenKind,
         expect: Expect,
-    ) -> Result<Self::FixedRepetition<N>, LexerError> {
+    ) -> Result<Self::FixedRepetition<T>, LexerError> {
         let mut count = 0;
         while lexer.matches(kind) {
             count += 1;
             lexer.next(expect)?;
         }
-        Ok(TinyTokenRepetition { count })
+        Ok(TinyTokenRepetition {
+            count,
+            _phantom: PhantomData,
+        })
     }
 
-    fn push_fixed_repetition<const N: usize>(
+    fn push_fixed_repetition<T: FixedToken>(
         state: &mut ParseState<Self>,
         kind: TokenKind,
         expect: Expect,
@@ -580,11 +597,12 @@ impl Style for Tiny {
         Ok(())
     }
 
-    fn pop_fixed_repetition<const N: usize>(
+    fn pop_fixed_repetition<T: FixedToken>(
         state: &mut ParseState<Self>,
-    ) -> Self::FixedRepetition<N> {
+    ) -> Self::FixedRepetition<T> {
         TinyTokenRepetition {
             count: state.tokens.pop_tiny_fixed_repetition(),
+            _phantom: PhantomData,
         }
     }
 }
@@ -593,54 +611,61 @@ impl Style for Tiny {
 pub(crate) struct Full;
 
 impl Style for Full {
-    type FixedRequired<const N: usize> = FixedTokenSpan<N>;
-    type FixedOptional<const N: usize> = FixedOptionalTokenSpan<N>;
-    type FixedRepetition<const N: usize> = FixedTokenSpanRepetition<N>;
+    type FixedRequired<T: FixedToken> = FixedTokenSpan<T>;
+    type FixedOptional<T: FixedToken> = FixedOptionalTokenSpan<T>;
+    type FixedRepetition<T: FixedToken> = FixedTokenSpanRepetition<T>;
 
     type Pos = usize;
 
-    fn fixed_required<const N: usize>(
+    fn fixed_required<T: FixedToken>(
         lexer: &mut CheckedLexer,
         expect: Expect,
-    ) -> Result<Self::FixedRequired<N>, LexerError> {
+    ) -> Result<Self::FixedRequired<T>, LexerError> {
         let pos = lexer.pos();
         lexer.next(expect)?;
-        Ok(FixedTokenSpan { pos })
+        Ok(FixedTokenSpan {
+            pos,
+            _phantom: PhantomData,
+        })
     }
 
-    fn push_fixed_required<const N: usize>(
+    fn push_fixed_required<T: FixedToken>(
         state: &mut ParseState<Self>,
         expect: Expect,
     ) -> Result<(), LexerError> {
         state
             .tokens
-            .push_fixed(Self::fixed_required::<N>(&mut state.lexer, expect)?);
+            .push_fixed(Self::fixed_required::<T>(&mut state.lexer, expect)?);
         Ok(())
     }
 
-    fn pop_fixed_required<const N: usize>(state: &mut ParseState<Self>) -> Self::FixedRequired<N> {
+    fn pop_fixed_required<T: FixedToken>(state: &mut ParseState<Self>) -> Self::FixedRequired<T> {
         state.tokens.pop_fixed()
     }
 
-    fn fixed_optional<const N: usize>(
+    fn fixed_optional<T: FixedToken>(
         lexer: &mut CheckedLexer,
         kind: TokenKind,
         expect: Expect,
-    ) -> Result<Self::FixedOptional<N>, LexerError> {
+    ) -> Result<Self::FixedOptional<T>, LexerError> {
         let pos = lexer.pos();
         let some = lexer.matches(kind);
         if some {
             lexer.next(expect)?;
         }
-        Ok(FixedOptionalTokenSpan { pos, some })
+        Ok(FixedOptionalTokenSpan {
+            pos,
+            some,
+            _phantom: PhantomData,
+        })
     }
 
-    fn push_fixed_optional<const N: usize>(
+    fn push_fixed_optional<T: FixedToken>(
         state: &mut ParseState<Self>,
         kind: TokenKind,
         expect: Expect,
     ) -> Result<(), LexerError> {
-        state.tokens.push_fixed_optional(Self::fixed_optional::<N>(
+        state.tokens.push_fixed_optional(Self::fixed_optional::<T>(
             &mut state.lexer,
             kind,
             expect,
@@ -648,37 +673,41 @@ impl Style for Full {
         Ok(())
     }
 
-    fn pop_fixed_optional<const N: usize>(state: &mut ParseState<Self>) -> Self::FixedOptional<N> {
+    fn pop_fixed_optional<T: FixedToken>(state: &mut ParseState<Self>) -> Self::FixedOptional<T> {
         state.tokens.pop_fixed_optional()
     }
 
-    fn fixed_repetition<const N: usize>(
+    fn fixed_repetition<T: FixedToken>(
         lexer: &mut CheckedLexer,
         kind: TokenKind,
         expect: Expect,
-    ) -> Result<Self::FixedRepetition<N>, LexerError> {
+    ) -> Result<Self::FixedRepetition<T>, LexerError> {
         let pos = lexer.pos();
         let mut tokens = SmallVec::new();
         while lexer.matches(kind) {
             tokens.push(Self::fixed_required(lexer, expect)?);
         }
-        Ok(FixedTokenSpanRepetition { pos, tokens })
+        Ok(FixedTokenSpanRepetition {
+            pos,
+            tokens,
+            _phantom: PhantomData,
+        })
     }
 
-    fn push_fixed_repetition<const N: usize>(
+    fn push_fixed_repetition<T: FixedToken>(
         state: &mut ParseState<Self>,
         kind: TokenKind,
         expect: Expect,
     ) -> Result<(), LexerError> {
         state
             .tokens
-            .push_fixed_repetition(Self::fixed_repetition::<N>(&mut state.lexer, kind, expect)?);
+            .push_fixed_repetition(Self::fixed_repetition::<T>(&mut state.lexer, kind, expect)?);
         Ok(())
     }
 
-    fn pop_fixed_repetition<const N: usize>(
+    fn pop_fixed_repetition<T: FixedToken>(
         state: &mut ParseState<Self>,
-    ) -> Self::FixedRepetition<N> {
+    ) -> Self::FixedRepetition<T> {
         state.tokens.pop_fixed_repetition()
     }
 }
@@ -941,65 +970,68 @@ impl TryCodeSpan for TokenSpanRepetition {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FixedTokenSpan<const N: usize> {
+pub(crate) struct FixedTokenSpan<T: FixedToken> {
     pub(crate) pos: usize,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<const N: usize> CodeSpan for FixedTokenSpan<N> {
+impl<T: FixedToken> CodeSpan for FixedTokenSpan<T> {
     fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
-            end: self.pos + N,
+            end: self.pos + T::TEXT.len(),
         }
     }
 }
 
-impl<const N: usize> TryCodeSpan for FixedTokenSpan<N> {
+impl<T: FixedToken> TryCodeSpan for FixedTokenSpan<T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
         Some(self.code_span())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FixedOptionalTokenSpan<const N: usize> {
+pub(crate) struct FixedOptionalTokenSpan<T: FixedToken> {
     pub(crate) pos: usize,
     pub(crate) some: bool,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<const N: usize> OptionalToken for FixedOptionalTokenSpan<N> {
+impl<T: FixedToken> OptionalToken for FixedOptionalTokenSpan<T> {
     fn is_some(&self) -> bool {
         self.some
     }
 }
 
-impl<const N: usize> CodeSpan for FixedOptionalTokenSpan<N> {
+impl<T: FixedToken> CodeSpan for FixedOptionalTokenSpan<T> {
     fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
-            end: self.pos + if self.some { N } else { 0 },
+            end: self.pos + if self.some { T::TEXT.len() } else { 0 },
         }
     }
 }
 
-impl<const N: usize> TryCodeSpan for FixedOptionalTokenSpan<N> {
+impl<T: FixedToken> TryCodeSpan for FixedOptionalTokenSpan<T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
         Some(self.code_span())
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FixedTokenSpanRepetition<const N: usize> {
+pub(crate) struct FixedTokenSpanRepetition<T: FixedToken> {
     pub(crate) pos: usize,
-    pub(crate) tokens: SmallVec<[FixedTokenSpan<N>; 1]>,
+    pub(crate) tokens: SmallVec<[FixedTokenSpan<T>; 1]>,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl<const N: usize> TokenRepetition for FixedTokenSpanRepetition<N> {
+impl<T: FixedToken> TokenRepetition for FixedTokenSpanRepetition<T> {
     fn count(&self) -> usize {
         self.tokens.len()
     }
 }
 
-impl<const N: usize> CodeSpan for FixedTokenSpanRepetition<N> {
+impl<T: FixedToken> CodeSpan for FixedTokenSpanRepetition<T> {
     fn code_span(&self) -> Range<usize> {
         Range {
             start: self.pos,
@@ -1007,55 +1039,59 @@ impl<const N: usize> CodeSpan for FixedTokenSpanRepetition<N> {
                 + self
                     .tokens
                     .last()
-                    .map_or(0, |token| token.pos - self.pos + N),
+                    .map_or(0, |token| token.pos - self.pos + T::TEXT.len()),
         }
     }
 }
 
-impl<const N: usize> TryCodeSpan for FixedTokenSpanRepetition<N> {
+impl<T: FixedToken> TryCodeSpan for FixedTokenSpanRepetition<T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
         Some(self.code_span())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TinyToken;
+pub(crate) struct TinyToken<T: FixedToken> {
+    _phantom: PhantomData<fn() -> T>,
+}
 
-impl TryCodeSpan for TinyToken {
+impl<T: FixedToken> TryCodeSpan for TinyToken<T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
         None
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TinyOptionalToken {
+pub(crate) struct TinyOptionalToken<T: FixedToken> {
     pub(crate) some: bool,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl OptionalToken for TinyOptionalToken {
+impl<T: FixedToken> OptionalToken for TinyOptionalToken<T> {
     fn is_some(&self) -> bool {
         self.some
     }
 }
 
-impl TryCodeSpan for TinyOptionalToken {
+impl<T: FixedToken> TryCodeSpan for TinyOptionalToken<T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
         None
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TinyTokenRepetition {
+pub(crate) struct TinyTokenRepetition<T: FixedToken> {
     pub(crate) count: usize,
+    _phantom: PhantomData<fn() -> T>,
 }
 
-impl TokenRepetition for TinyTokenRepetition {
+impl<T: FixedToken> TokenRepetition for TinyTokenRepetition<T> {
     fn count(&self) -> usize {
         self.count
     }
 }
 
-impl TryCodeSpan for TinyTokenRepetition {
+impl<T: FixedToken> TryCodeSpan for TinyTokenRepetition<T> {
     fn try_code_span(&self) -> Option<Range<usize>> {
         None
     }
@@ -1072,23 +1108,27 @@ impl TokenStack {
         self.data.is_empty() && self.optionals.is_empty()
     }
 
-    pub(crate) fn push_fixed<const N: usize>(&mut self, token: FixedTokenSpan<N>) {
+    pub(crate) fn push_fixed<T: FixedToken>(&mut self, token: FixedTokenSpan<T>) {
         self.data.push(token.pos);
     }
 
-    pub(crate) fn pop_fixed<const N: usize>(&mut self) -> FixedTokenSpan<N> {
-        FixedTokenSpan { pos: self.pop() }
+    pub(crate) fn pop_fixed<T: FixedToken>(&mut self) -> FixedTokenSpan<T> {
+        FixedTokenSpan {
+            pos: self.pop(),
+            _phantom: PhantomData,
+        }
     }
 
-    pub(crate) fn push_fixed_optional<const N: usize>(&mut self, token: FixedOptionalTokenSpan<N>) {
+    pub(crate) fn push_fixed_optional<T: FixedToken>(&mut self, token: FixedOptionalTokenSpan<T>) {
         self.optionals.push(token.some);
         self.data.push(token.pos);
     }
 
-    pub(crate) fn pop_fixed_optional<const N: usize>(&mut self) -> FixedOptionalTokenSpan<N> {
+    pub(crate) fn pop_fixed_optional<T: FixedToken>(&mut self) -> FixedOptionalTokenSpan<T> {
         FixedOptionalTokenSpan {
             pos: self.pop(),
             some: self.pop_optional(),
+            _phantom: PhantomData,
         }
     }
 
@@ -1100,9 +1140,9 @@ impl TokenStack {
         self.pop_optional()
     }
 
-    pub(crate) fn push_fixed_repetition<const N: usize>(
+    pub(crate) fn push_fixed_repetition<T: FixedToken>(
         &mut self,
-        repetition: FixedTokenSpanRepetition<N>,
+        repetition: FixedTokenSpanRepetition<T>,
     ) {
         self.data
             .extend(repetition.tokens.iter().rev().map(|token| token.pos));
@@ -1110,14 +1150,18 @@ impl TokenStack {
         self.data.push(repetition.pos);
     }
 
-    pub(crate) fn pop_fixed_repetition<const N: usize>(&mut self) -> FixedTokenSpanRepetition<N> {
+    pub(crate) fn pop_fixed_repetition<T: FixedToken>(&mut self) -> FixedTokenSpanRepetition<T> {
         FixedTokenSpanRepetition {
             pos: self.pop(),
             tokens: {
                 (0..self.pop())
-                    .map(|_| FixedTokenSpan { pos: self.pop() })
+                    .map(|_| FixedTokenSpan {
+                        pos: self.pop(),
+                        _phantom: PhantomData,
+                    })
                     .collect()
             },
+            _phantom: PhantomData,
         }
     }
 
