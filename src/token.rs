@@ -296,9 +296,9 @@ macro_rules! impl_fixed_token_kind {
 }
 
 pub(crate) trait TokenStorage<S: Style> {
-    type Required: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
-    type Optional: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
-    type Repetition: Clone + fmt::Debug + PartialEq + Eq + TryCodeSpan;
+    type Required: RequiredToken;
+    type Optional: OptionalToken;
+    type Repetition: TokenRepetition;
 }
 
 impl_token_kind! {
@@ -440,9 +440,9 @@ impl Pos for NoPos {
 }
 
 pub(crate) trait Style: Clone + fmt::Debug + PartialEq + Eq {
-    type FixedRequired<const N: usize>: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
-    type FixedOptional<const N: usize>: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan;
-    type FixedRepetition<const N: usize>: Clone + fmt::Debug + PartialEq + Eq + TryCodeSpan;
+    type FixedRequired<const N: usize>: RequiredToken;
+    type FixedOptional<const N: usize>: OptionalToken;
+    type FixedRepetition<const N: usize>: TokenRepetition;
 
     type Pos: Pos;
 
@@ -836,6 +836,23 @@ impl From<TokenKind> for NestedTokenSet {
     }
 }
 
+pub(crate) trait RequiredToken:
+    Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan
+{
+}
+
+impl<T: Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan> RequiredToken for T {}
+
+pub(crate) trait OptionalToken:
+    Clone + Copy + fmt::Debug + PartialEq + Eq + TryCodeSpan
+{
+    fn is_some(&self) -> bool;
+}
+
+pub(crate) trait TokenRepetition: Clone + fmt::Debug + PartialEq + Eq + TryCodeSpan {
+    fn count(&self) -> usize;
+}
+
 pub(crate) trait CodeSpan {
     fn code_span(&self) -> Range<usize>;
 }
@@ -871,6 +888,12 @@ pub(crate) struct OptionalTokenSpan {
     pub(crate) len: Option<NonZeroUsize>,
 }
 
+impl OptionalToken for OptionalTokenSpan {
+    fn is_some(&self) -> bool {
+        self.len.is_some()
+    }
+}
+
 impl CodeSpan for OptionalTokenSpan {
     fn code_span(&self) -> Range<usize> {
         Range {
@@ -890,6 +913,12 @@ impl TryCodeSpan for OptionalTokenSpan {
 pub(crate) struct TokenSpanRepetition {
     pub(crate) pos: usize,
     pub(crate) tokens: SmallVec<[TokenSpan; 1]>,
+}
+
+impl TokenRepetition for TokenSpanRepetition {
+    fn count(&self) -> usize {
+        self.tokens.len()
+    }
 }
 
 impl CodeSpan for TokenSpanRepetition {
@@ -937,6 +966,12 @@ pub(crate) struct FixedOptionalTokenSpan<const N: usize> {
     pub(crate) some: bool,
 }
 
+impl<const N: usize> OptionalToken for FixedOptionalTokenSpan<N> {
+    fn is_some(&self) -> bool {
+        self.some
+    }
+}
+
 impl<const N: usize> CodeSpan for FixedOptionalTokenSpan<N> {
     fn code_span(&self) -> Range<usize> {
         Range {
@@ -956,6 +991,12 @@ impl<const N: usize> TryCodeSpan for FixedOptionalTokenSpan<N> {
 pub(crate) struct FixedTokenSpanRepetition<const N: usize> {
     pub(crate) pos: usize,
     pub(crate) tokens: SmallVec<[FixedTokenSpan<N>; 1]>,
+}
+
+impl<const N: usize> TokenRepetition for FixedTokenSpanRepetition<N> {
+    fn count(&self) -> usize {
+        self.tokens.len()
+    }
 }
 
 impl<const N: usize> CodeSpan for FixedTokenSpanRepetition<N> {
@@ -991,6 +1032,12 @@ pub(crate) struct TinyOptionalToken {
     pub(crate) some: bool,
 }
 
+impl OptionalToken for TinyOptionalToken {
+    fn is_some(&self) -> bool {
+        self.some
+    }
+}
+
 impl TryCodeSpan for TinyOptionalToken {
     fn try_code_span(&self) -> Option<Range<usize>> {
         None
@@ -1000,6 +1047,12 @@ impl TryCodeSpan for TinyOptionalToken {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TinyTokenRepetition {
     pub(crate) count: usize,
+}
+
+impl TokenRepetition for TinyTokenRepetition {
+    fn count(&self) -> usize {
+        self.count
+    }
 }
 
 impl TryCodeSpan for TinyTokenRepetition {
