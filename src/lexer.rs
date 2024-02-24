@@ -1,5 +1,6 @@
 use std::{mem::replace, num::NonZeroUsize};
 
+use itertools::Itertools;
 use thiserror::Error;
 
 use crate::token::{Expect, FixedTokenKind, TokenKind, TokenSet};
@@ -61,6 +62,51 @@ impl<'code> Lexer<'code> {
             }
             self.pos += next;
         }
+    }
+
+    /// Minifies the given code in terms of whitespace.
+    ///
+    /// Required whitespace (e.g. between two identifiers) will be replaced with a single space.
+    pub(crate) fn remove_whitespace(code: &'code str) -> Result<String, LexerError> {
+        let mut lexer = Self::new(code)?;
+        let pos = lexer.pos();
+        let mut without_whitespace = String::new();
+        let mut result = String::new();
+        if let Some(first_token) = lexer.next() {
+            let mut prev_token = &code[pos..pos + first_token?.len.get()];
+            result += prev_token;
+            loop {
+                let pos = lexer.pos();
+                if let Some(token) = lexer.next() {
+                    let token = &code[pos..pos + token?.len.get()];
+
+                    without_whitespace.clear();
+                    without_whitespace.push_str(prev_token);
+                    without_whitespace.push_str(token);
+                    if Self::requires_whitespace(&without_whitespace, prev_token.len(), token.len())
+                    {
+                        result.push(' ');
+                    }
+
+                    result += token;
+                    prev_token = token;
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Whether the two given tokens require whitespace between them to lex correctly.
+    fn requires_whitespace(without_whitespace: &str, lhs_len: usize, rhs_len: usize) -> bool {
+        let Ok(lexer) = Lexer::new(without_whitespace) else {
+            return true;
+        };
+        let Some((Ok(lex_lhs), Ok(lex_rhs))) = lexer.collect_tuple() else {
+            return true;
+        };
+        lex_lhs.len.get() != lhs_len || lex_rhs.len.get() != rhs_len
     }
 }
 
