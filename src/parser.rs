@@ -9,8 +9,8 @@ use crate::{
     lexer::{CheckedLexer, Lexer, LexerError},
     push_array::PushArray,
     token::{
-        tokens, CodeSpan, Expect, Full, NestedTokenSet, Pos, Style, Tiny, TokenKind, TokenStack,
-        TokenStorage, TryCodeSpan,
+        tokens, CodeSpan, Expect, FixedTokenKind, Full, NestedTokenSet, Pos, Style, Tiny,
+        TokenKind, TokenStack, TokenStorage, TryCodeSpan,
     },
 };
 
@@ -655,12 +655,23 @@ macro_rules! reverse {
     };
 }
 
+/// TODO: name
+macro_rules! non_exhaustive_or_last_required {
+    ( $Name:ident $Field:tt $field:ident $nodes:ident ) => { paste!{ if_node!($Field {
+        let index = [<$Name:snake>]::Field::[<$field:camel>] as usize;
+        let is_non_exhaustive = !Self::EXPECTED_TOKENS_FROM.as_array()[index].exhaustive;
+        let is_last_required = index + 1 == [<$Name:snake>]::Field::LENGTH || !Self::EXPECTED_TOKENS_FROM.as_array()[index + 1].exhaustive;
+        nodes_dot_field!($nodes $Field) |= is_non_exhaustive || is_last_required;
+    }); } };
+}
+
 /// Implements a concatenation node, that supports both optionals and repetitions.
 ///
 /// Fields can be both tokens as well as nodes.
 macro_rules! impl_struct_parse {
     ( $Name:ident {
-        $( $field:ident: $Field:tt, )*
+        $first_field:ident: $FirstField:tt,
+        $( $whitespace:tt $field:ident: $Field:tt, )*
     } ) => { paste! {
         mod [<$Name:snake>] {
             use enum_map::Enum;
@@ -669,6 +680,7 @@ macro_rules! impl_struct_parse {
             #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Enum)]
             pub(crate) enum Field {
                 #[default]
+                [<$first_field:camel>],
                 $( [<$field:camel>], )*
             }
 
@@ -683,12 +695,14 @@ macro_rules! impl_struct_parse {
 
         /// A concatenation node within a grammar.
         pub(crate) struct $Name<S: Style> {
+           pub(crate) $first_field: field_type!($FirstField),
            $( pub(crate) $field: field_type!($Field), )*
         }
 
         impl<S: Style> Clone for $Name<S> {
             fn clone(&self) -> Self {
                 Self {
+                    $first_field: self.$first_field.clone(),
                     $( $field: self.$field.clone(), )*
                 }
             }
@@ -697,6 +711,7 @@ macro_rules! impl_struct_parse {
         impl<S: Style> fmt::Debug for $Name<S> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_struct(stringify!($Name))
+                    .field(stringify!($first_field), &self.$first_field)
                     $( .field(stringify!($field), &self.$field) )*
                     .finish()
             }
@@ -704,7 +719,8 @@ macro_rules! impl_struct_parse {
 
         impl<S: Style> PartialEq for $Name<S> {
             fn eq(&self, other: &Self) -> bool {
-                $( self.$field == other.$field )&&*
+                self.$first_field == other.$first_field
+                $( && self.$field == other.$field )*
             }
         }
 
@@ -714,7 +730,7 @@ macro_rules! impl_struct_parse {
             /// Expected tokens for a given field, including everything up until and including the next required field.
             const EXPECTED_TOKENS_FROM: EnumMap<[<$Name:snake>]::Field, NestedTokenSet> = EnumMap::from_array({
                 let array = PushArray([]);
-                repeat_until_empty!(array $( $Field )* ).0
+                repeat_until_empty!(array $FirstField $( $Field )* ).0
             });
 
             /// The last required field as well as everything after.
@@ -722,24 +738,24 @@ macro_rules! impl_struct_parse {
             /// Used to check for recursion that would lead to ambiguity in the grammar.
             const LAST_REQUIRED_AND_NON_EXHAUSTIVE_NODES: NodeSet = {
                 let mut nodes = NodeSet::new();
-                $( if_node!($Field {
-                    let index = [<$Name:snake>]::Field::[<$field:camel>] as usize;
-                    let is_non_exhaustive = !Self::EXPECTED_TOKENS_FROM.as_array()[index].exhaustive;
-                    let is_last_required = index + 1 == [<$Name:snake>]::Field::LENGTH || !Self::EXPECTED_TOKENS_FROM.as_array()[index + 1].exhaustive;
-                    nodes_dot_field!(nodes $Field) |= is_non_exhaustive || is_last_required;
-                }); )*
+                non_exhaustive_or_last_required!($Name $FirstField $first_field nodes);
+                $( non_exhaustive_or_last_required!($Name $Field $field nodes); )*
                 nodes
             };
 
             /// Moves nodes from `self` into the given [`DroppedNodes`].
             fn drain_into_dropped_nodes(&mut self, nodes: &mut DroppedNodes<S>) {
+                drain_field_into_dropped_nodes!($FirstField nodes self $first_field);
                 $( drain_field_into_dropped_nodes!($Field nodes self $field); )*
             }
         }
 
         const _: EnumMap<[<$Name:snake>]::Field, NestedTokenSet> = $Name::<Tiny>::EXPECTED_TOKENS_FROM;
         const _: NestedTokenSet = $Name::<Tiny>::EXPECTED_TOKENS;
-        const _: () = { $( ensure_no_recursive_node_repetition!($Name $Field $field); )* };
+        const _: () = {
+            ensure_no_recursive_node_repetition!($Name $FirstField $first_field);
+            $( ensure_no_recursive_node_repetition!($Name $Field $field); )*
+        };
 
         impl<S: Style> ExpectedTokens for $Name<S> {
             /// Shorthand for the first entry in `EXPECTED_TOKENS_FROM`.
@@ -747,7 +763,7 @@ macro_rules! impl_struct_parse {
             /// Implemented in a way that does not introduce cycle compiler errors.
             const EXPECTED_TOKENS: NestedTokenSet = {
                 let tokens = NestedTokenSet::new();
-                until_required!(tokens $( $Field )* )
+                until_required!(tokens $FirstField $( $Field )* )
             };
         }
 
@@ -763,24 +779,31 @@ macro_rules! impl_struct_parse {
                     reverse!( $( {
                         $field = pop_field!($Field state)
                     } )* );
-                    state.nodes.[<$Name:snake>].push(Self { $( $field, )* });
+                    let $first_field = pop_field!($FirstField state);
+                    state.nodes.[<$Name:snake>].push(Self { $first_field, $( $field, )* });
                     return Ok(());
                 }
                 if !repetition {
                     state.push_next_field::<Self>(expect, field);
                 }
-                match [<$Name:snake>]::Field::from_usize(field) { $( [<$Name:snake>]::Field::[<$field:camel>] => {
-                    parse_by_mode_iterative!($Field state expect field repetition { expect_field!($Field $Name $field expect) });
-                } )* }
+                match [<$Name:snake>]::Field::from_usize(field) {
+                    [<$Name:snake>]::Field::[<$first_field:camel>] => {
+                        parse_by_mode_iterative!($FirstField state expect field repetition { expect_field!($FirstField $Name $first_field expect) });
+                    }
+                    $( [<$Name:snake>]::Field::[<$field:camel>] => {
+                        parse_by_mode_iterative!($Field state expect field repetition { expect_field!($Field $Name $field expect) });
+                    } )*
+                 }
                 Ok(())
             }
 
             impl_pop_final_node!($Name);
 
             fn parse_nested(lexer: &mut CheckedLexer, expect: Expect) -> Result<Self, LexerError> {
-                Ok(Self { $( $field: {
-                    parse_by_mode!($Field lexer { expect_field!($Field $Name $field expect) })
-                }, )* })
+                Ok(Self {
+                    $first_field: { parse_by_mode!($FirstField lexer { expect_field!($FirstField $Name $first_field expect) }) },
+                    $( $field: { parse_by_mode!($Field lexer { expect_field!($Field $Name $field expect) }) }, )*
+                })
             }
         }
 
@@ -793,17 +816,15 @@ macro_rules! impl_struct_parse {
 
         impl CodeSpan for $Name<Full> {
             fn code_span(&self) -> Range<usize> {
-                let (first, ..) = ( $( &self.$field, )* );
-                let (.., last) = ( $( &self.$field, )* );
-                first.code_span().start..last.code_span().end
+                let (.., last) = ( &self.$first_field, $( &self.$field, )* );
+                self.$first_field.code_span().start..last.code_span().end
             }
         }
 
         impl<S: Style> TryCodeSpan for $Name<S> {
             fn try_code_span(&self) -> Option<Range<usize>> {
-                let (first, ..) = ( $( &self.$field, )* );
-                let (.., last) = ( $( &self.$field, )* );
-                Some(first.try_code_span()?.start..last.try_code_span()?.end)
+                let (.., last) = ( &self.$first_field, $( &self.$field, )* );
+                Some(self.$first_field.try_code_span()?.start..last.try_code_span()?.end)
             }
         }
     } };
@@ -1278,13 +1299,17 @@ enum Literal {
 
 struct SelfRepetition {
     l_paren: [LParen],
+    ()
     more: (SelfRepetition[*]),
+    ()
     r_paren: [RParen],
 }
 
 struct Other {
     a: [Ident*],
+    ()
     b: [Fn?],
+    ()
     c: [Plus],
 }
 
@@ -1300,18 +1325,31 @@ enum EnumNode {
 
 struct Test {
     token: [Ident],
+    ()
     optional_token: [Integer?],
+    ()
     token_repetition: [Float*],
+    ()
     struct_node: (StructNode),
+    ()
     sep1: [Comma],
+    ()
     optional_struct_node: (StructNode?),
+    ()
     sep2: [Comma],
+    ()
     struct_node_repetition: (StructNode*),
+    ()
     sep3: [Comma],
+    ()
     enum_node: (EnumNode),
+    ()
     sep4: [Comma],
+    ()
     optional_enum_node: (EnumNode?),
+    ()
     sep5: [Comma],
+    ()
     enum_node_repetition: (EnumNode*),
 }
 
